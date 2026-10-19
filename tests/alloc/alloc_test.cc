@@ -46,8 +46,12 @@ void* CountedAlloc(std::size_t n, std::size_t align) {
 // NOLINTBEGIN: replacing the global allocation functions is the point here.
 void* operator new(std::size_t n) { return CountedAlloc(n, 0); }
 void* operator new[](std::size_t n) { return CountedAlloc(n, 0); }
-void* operator new(std::size_t n, std::align_val_t a) { return CountedAlloc(n, static_cast<size_t>(a)); }
-void* operator new[](std::size_t n, std::align_val_t a) { return CountedAlloc(n, static_cast<size_t>(a)); }
+void* operator new(std::size_t n, std::align_val_t a) {
+  return CountedAlloc(n, static_cast<size_t>(a));
+}
+void* operator new[](std::size_t n, std::align_val_t a) {
+  return CountedAlloc(n, static_cast<size_t>(a));
+}
 void* operator new(std::size_t n, const std::nothrow_t&) noexcept {
   try {
     return CountedAlloc(n, 0);

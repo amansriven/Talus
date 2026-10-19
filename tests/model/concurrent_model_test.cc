@@ -100,8 +100,8 @@ TEST(ConcurrentModelTest, DisjointWritersWithSnapshotReaders) {
             break;
           }
           default: {
-            const std::string value = "w" + std::to_string(w) + "_" + std::to_string(i) +
-                                      std::string(rng() % 100, 'x');
+            const std::string value =
+                "w" + std::to_string(w) + "_" + std::to_string(i) + std::string(rng() % 100, 'x');
             ASSERT_TRUE(db->Put({}, key, value).ok());
             model[key] = value;
             break;
@@ -135,7 +135,8 @@ TEST(ConcurrentModelTest, DisjointWritersWithSnapshotReaders) {
           for (int j = 0; j < kPairsPerWriter; ++j) {
             auto a = first.find(PairKey(w, 'a', j));
             auto b = first.find(PairKey(w, 'b', j));
-            ASSERT_EQ(a == first.end(), b == first.end()) << "half a pair at " << PairKey(w, 'a', j);
+            ASSERT_EQ(a == first.end(), b == first.end())
+                << "half a pair at " << PairKey(w, 'a', j);
             if (a != first.end()) {
               ASSERT_EQ(a->second, b->second) << "torn pair at " << PairKey(w, 'a', j);
               const long version = std::stol(a->second);

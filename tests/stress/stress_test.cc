@@ -54,7 +54,7 @@ TEST(StressTest, EverythingAtOnce) {
   o.target_file_size = 64 << 10;
   o.l1_max_bytes = 256 << 10;
   o.l0_compaction_trigger = 2;
-  o.max_background_compactions = 2;  // Concurrent compactions too.
+  o.max_background_compactions = 2;    // Concurrent compactions too.
   o.block_cache_capacity = 256 << 10;  // Small: constant eviction.
   std::unique_ptr<DB> db;
   ASSERT_TRUE(DB::Open(o, dir.path(), &db).ok());

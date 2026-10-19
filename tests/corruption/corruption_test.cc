@@ -218,7 +218,8 @@ TEST_F(CorruptionTest, WalTruncationIsACleanTail) {
     paranoid.paranoid_checks = true;  // A torn tail is not corruption.
     std::unique_ptr<DB> db;
     ASSERT_TRUE(DB::Open(paranoid, dir, &db).ok()) << "truncated to " << len;
-    const int present = CheckBatchPrefix(db.get(), kBatches, "WAL truncated to " + std::to_string(len));
+    const int present =
+        CheckBatchPrefix(db.get(), kBatches, "WAL truncated to " + std::to_string(len));
     EXPECT_GE(present, previous) << "a longer WAL recovered fewer batches";
     previous = present;
   }
@@ -256,8 +257,8 @@ TEST_F(CorruptionTest, SstDamageIsCorruptionNeverWrongData) {
       } else {
         FlipByte(table, where);
       }
-      const std::string context = name + (truncate ? " truncated to " : " flipped at ") +
-                                  std::to_string(where);
+      const std::string context =
+          name + (truncate ? " truncated to " : " flipped at ") + std::to_string(where);
       std::unique_ptr<DB> db;
       ASSERT_TRUE(DB::Open(TestOptions(), dir, &db).ok()) << context;  // Tables open lazily.
       for (int b = 0; b < kBatches; ++b) {
@@ -323,7 +324,8 @@ class MetadataCorruptionTest : public CorruptionTest {
 };
 
 TEST_F(MetadataCorruptionTest, ManifestDamageIsCorruptionNeverWrongData) {
-  const std::string name = fs::path(FileOfType(golden_.path(), FileType::kDescriptorFile)).filename();
+  const std::string name =
+      fs::path(FileOfType(golden_.path(), FileType::kDescriptorFile)).filename();
   const uint64_t size = fs::file_size(golden_.path() + "/" + name);
   for (uint64_t offset : Offsets(size, 80)) {
     const std::string dir = FreshCopy();

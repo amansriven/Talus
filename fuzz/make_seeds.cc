@@ -74,7 +74,8 @@ int Run(int argc, char** argv) {
   }
 
   // SSTables: with and without filters.
-  for (FilterType filter : {FilterType::kNone, FilterType::kBlockedBloom, FilterType::kStandardBloom}) {
+  for (FilterType filter :
+       {FilterType::kNone, FilterType::kBlockedBloom, FilterType::kStandardBloom}) {
     const fs::path path = scratch / "seed.sst";
     {
       std::unique_ptr<WritableFile> file;

@@ -203,8 +203,7 @@ Status DBImpl::Recover() {
   // crash-torn tail. Then the writes it covered are gone from both the WAL
   // and the MANIFEST, and opening would silently return stale data.
   const uint64_t log_number = versions_->log_number();
-  if (log_number != 0 &&
-      std::find(logs.begin(), logs.end(), log_number) == logs.end()) {
+  if (log_number != 0 && std::find(logs.begin(), logs.end(), log_number) == logs.end()) {
     return Status::Corruption(LogFileName(dbname_, log_number),
                               "WAL named by the MANIFEST is missing (lost MANIFEST edit?)");
   }

@@ -14,10 +14,11 @@ It has two goals, and they're equally important:
 1. **Never lose your data.** Crash it, corrupt it, `SIGKILL` it 10,000 times. Every acknowledged write must survive.
 2. **Go fast, and prove it.** Lock-free data structures, zero-allocation hot paths, cache-line-aware layouts, and tail-latency claims backed by hardware performance counters.
 
-> 🚧 **Status:** Phases 0–7 of 10 are done ([roadmap](docs/PHASES.md)). The engine works end to end:
+> 🚧 **Status:** Phases 0–8 of 10 are done ([roadmap](docs/PHASES.md)). The engine works end to end:
 > crash-safe writes with group commit, a lock-free read path, SSTables with cache-line-blocked bloom
-> filters, leveled compaction, snapshots, iterators and zero-copy reads. Next up: the full
-> verification gauntlet (Phase 8), then benchmarks against LevelDB and RocksDB.
+> filters, leveled compaction, snapshots, iterators and zero-copy reads. It's verified by a
+> 1M-operation model test, a SIGKILL crash harness, corruption sweeps and fuzzing. Next up:
+> benchmarks against LevelDB and RocksDB.
 
 ---
 
@@ -72,19 +73,20 @@ keeps hot data in memory, so most reads never touch the disk.
 | **Thread-local SuperVersion** | The `Get` fast path takes **zero mutexes**, just one atomic generation check |
 | **Cache-line-blocked bloom filter** | Every probe stays inside one 64-byte cache line, so there's at most one cache miss |
 | **Hardware CRC32C** | SSE4.2 on x86, ARMv8 CRC on ARM, with a slicing-by-8 software fallback chosen at runtime |
-| **Zero-allocation hot paths** | `Put`, `Write`, and `Get` into a `PinnableValue` (memtable or block-cache hit) measured at **0 heap allocations per 100K ops** |
+| **Zero-allocation hot paths** | `Put`, `Write`, and `Get` into a `PinnableValue` (memtable or block-cache hit) make **0 heap allocations per 100K ops**, and a test enforces it |
 | **Per-thread stats** | Counters live in padded per-thread slots, so stats don't cause false sharing |
 
 ## 🛡️ How we know it's correct
 
 "It works on my machine" isn't the bar.
 
-- 🧪 **250+ tests, run under ASan, UBSan and ThreadSanitizer** on every change, including a check of the whole engine against a `std::map` model across flushes, compactions and reopens.
-- 🎲 **Model-based randomized testing:** 1M+ random operations run against both Talus and a `std::map`, which must agree exactly. Failures save a replay file for deterministic reproduction. *(Scaled up in Phase 8.)*
-- 💥 **Crash harness:** a child process writes synced batches, the parent `SIGKILL`s it at a random moment, then reopens the DB and checks that every acknowledged batch is present and none is half-applied. *(Phase 8.)*
-- 🧨 **Corruption tests:** flipping bits in WAL, SST and MANIFEST files gives a clean `Corruption` error, never a crash or wrong data. SSTables already get a byte-flip sweep across the whole file.
-- 🐛 **Fuzzing** (libFuzzer) for every on-disk format parser. *(Phase 8.)*
+- 🧪 **265 tests, run under ASan, UBSan and ThreadSanitizer** on every change.
+- 🎲 **Model-based randomized testing:** 1M random operations (puts, deletes, batches, scans, snapshots, flushes, compactions, reopens) run against both Talus and a `std::map`, which must agree exactly. Failures save a replay file, and `--replay` reproduces them deterministically.
+- 💥 **Crash harness:** a child process writes synced batches, the parent `SIGKILL`s it at a random moment, then reopens the DB and checks that every acknowledged batch is present and none is half-applied. Kills regularly land mid-flush and mid-compaction.
+- 🧨 **Corruption tests:** flipping or truncating bytes in WAL, SST, MANIFEST and CURRENT files gives a clean `Corruption` error (or a clean WAL tail), never a crash or wrong data.
+- 🐛 **Fuzzing** (libFuzzer + ASan + UBSan) for every on-disk format parser: 18M+ executions, zero crashes.
 - 🧵 **ThreadSanitizer stress tests:** readers, writers, iterators and snapshots run concurrently while compaction runs, with zero data races allowed.
+- 🧮 **Allocation test:** a counting `operator new` proves the hot paths make zero heap allocations.
 
 ## 📊 Benchmarks
 
@@ -116,6 +118,15 @@ ctest --preset debug
 
 **Platforms:** Linux x86-64 is the primary target (all performance work happens there).
 macOS ARM64 is fully supported for building and testing.
+
+The heavy checks can also be run on their own:
+
+```bash
+./build/release/tests/talus_model_test --ops 1000000             # model check (any --seed)
+./build/release/tests/talus_model_test --replay talus_model_failure_<seed>.txt
+./build/release/tests/talus_crash_test --iterations 10000        # the long crash run
+CC=clang CXX=clang++ cmake --preset fuzz && cmake --build --preset fuzz   # libFuzzer targets
+```
 
 ## 🚀 Using it
 
@@ -161,8 +172,8 @@ src/table/       blocks, bloom filters, SSTable builder/reader, merging iterator
 src/cache/       sharded LRU block cache, table cache
 src/version/     versions, MANIFEST, compaction picking
 src/db/          the engine: group commit, SuperVersions, flush, compaction, iterators
-tests/unit/      unit + integration tests   (crash, fuzz, stress, allocation: Phase 8)
-fuzz/            libFuzzer targets   (Phase 8)
+tests/           unit/, model/ (incl. concurrent), crash/, corruption/, stress/, alloc/
+fuzz/            libFuzzer targets + seed-corpus generator
 bench/           db_bench, YCSB, microbenchmarks, plotting scripts   (Phase 9)
 docs/            DESIGN.md (byte-level formats and concurrency proofs), PHASES.md
 ```

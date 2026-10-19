@@ -27,8 +27,8 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
       return 0;
     }
   }
-  const auto mode =
-      size > 0 && (data[0] & 1) != 0 ? RandomAccessFile::Mode::kMmap : RandomAccessFile::Mode::kPread;
+  const auto mode = size > 0 && (data[0] & 1) != 0 ? RandomAccessFile::Mode::kMmap
+                                                   : RandomAccessFile::Mode::kPread;
   std::unique_ptr<RandomAccessFile> file;
   if (!RandomAccessFile::Open(path, mode, &file).ok()) {
     return 0;

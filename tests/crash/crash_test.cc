@@ -89,10 +89,11 @@ int64_t ReadAcks(int fd, std::chrono::steady_clock::time_point deadline, std::st
     const auto now = std::chrono::steady_clock::now();
     int timeout_ms = -1;  // time_point::max(): block until EOF.
     if (deadline != std::chrono::steady_clock::time_point::max()) {
-      timeout_ms = now >= deadline ? 0
-                                   : static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
-                                                          deadline - now)
-                                                          .count());
+      timeout_ms =
+          now >= deadline
+              ? 0
+              : static_cast<int>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count());
     }
     pollfd p{fd, POLLIN, 0};
     const int ready = poll(&p, 1, timeout_ms);
@@ -189,7 +190,8 @@ int64_t Verify(const std::string& dir, uint64_t check_from, int64_t max_acked, i
 
 int Run(int argc, char** argv) {
   int iterations = 100;
-  uint64_t seed = static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+  uint64_t seed =
+      static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
   std::string dir;
   for (int i = 1; i + 1 < argc; i += 2) {
     const std::string flag = argv[i];
@@ -241,8 +243,8 @@ int Run(int argc, char** argv) {
     int status = 0;
     waitpid(pid, &status, 0);
     // Acks written before the kill are still in the pipe: they count.
-    max_acked = std::max(max_acked, ReadAcks(fds[0], std::chrono::steady_clock::time_point::max(),
-                                             &partial));
+    max_acked = std::max(max_acked,
+                         ReadAcks(fds[0], std::chrono::steady_clock::time_point::max(), &partial));
     close(fds[0]);
     if (!WIFSIGNALED(status) || WTERMSIG(status) != SIGKILL) {
       std::fprintf(stderr, "iteration %d: child exited on its own (status %d)\n", it, status);
@@ -264,8 +266,7 @@ int Run(int argc, char** argv) {
     }
   }
   std::filesystem::remove_all(dir);
-  std::printf("PASSED: %d kills, %" PRIu64 " acknowledged batches, %" PRIu64
-              " batches verified\n",
+  std::printf("PASSED: %d kills, %" PRIu64 " acknowledged batches, %" PRIu64 " batches verified\n",
               iterations, total_acked, next_batch);
   return 0;
 }

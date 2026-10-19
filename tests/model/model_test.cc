@@ -191,7 +191,8 @@ class Runner {
       case OpType::kScan: {
         const bool use_snapshot = op.c > 0 && snapshots_[op.c - 1] != nullptr;
         const Snapshot* snap = use_snapshot ? snapshots_[op.c - 1] : nullptr;
-        return CompareScan(Key(op.a), op.b, snap, use_snapshot ? snapshot_models_[op.c - 1] : model_);
+        return CompareScan(Key(op.a), op.b, snap,
+                           use_snapshot ? snapshot_models_[op.c - 1] : model_);
       }
       case OpType::kTakeSnapshot:
         ReleaseSlot(op.a);
@@ -292,7 +293,8 @@ class Runner {
 
 int Run(int argc, char** argv) {
   uint64_t num_ops = 1'000'000;
-  uint64_t seed = static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+  uint64_t seed =
+      static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
   std::string replay_file;
   std::string dir;
   uint64_t inject_at = UINT64_MAX;
@@ -337,7 +339,8 @@ int Run(int argc, char** argv) {
   }
 
   if (dir.empty()) {
-    dir = (std::filesystem::temp_directory_path() / ("talus_model_" + std::to_string(seed))).string();
+    dir =
+        (std::filesystem::temp_directory_path() / ("talus_model_" + std::to_string(seed))).string();
   }
   std::filesystem::remove_all(dir);
   auto runner = std::make_unique<Runner>(dir);
