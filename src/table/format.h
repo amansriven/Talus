@@ -17,6 +17,7 @@
 
 #include "Talus/options.h"
 #include "Talus/status.h"
+#include "util/buffer_pool.h"
 #include "util/coding.h"
 
 namespace talus {
@@ -56,14 +57,16 @@ struct Footer {
 // A block's bytes after verification and decompression.
 struct BlockContents {
   std::string_view data;
-  // Owns `data`, unless it points into a memory-mapped file.
-  std::unique_ptr<char[]> heap;
+  // Owns `data`, unless it points into a memory-mapped file (then null).
+  Buffer heap;
 };
 
 // Reads the block at `handle`, always verifies its checksum, and
-// decompresses it if needed. Returns Corruption on a bad checksum, an
-// unknown compression type, or a handle beyond the end of the file.
-Status ReadBlock(const RandomAccessFile& file, const BlockHandle& handle, BlockContents* result);
+// decompresses it if needed. Buffers come from `pool` if it is non-null.
+// Returns Corruption on a bad checksum, an unknown compression type, or a
+// handle beyond the end of the file.
+Status ReadBlock(const RandomAccessFile& file, const BlockHandle& handle, HugePageBufferPool* pool,
+                 BlockContents* result);
 
 // True if this build can write and read blocks compressed with `type`.
 bool CompressionSupported(CompressionType type);

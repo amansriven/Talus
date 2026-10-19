@@ -36,9 +36,9 @@ class Block {
   friend class BlockIter;
 
   std::string_view data_;
-  std::unique_ptr<char[]> heap_;  // Owns data_ unless it points into an mmap.
-  uint32_t restart_offset_ = 0;   // Offset of the restart array.
-  uint32_t num_restarts_ = 0;     // 0 if malformed.
+  Buffer heap_;                  // Owns data_ unless it points into an mmap.
+  uint32_t restart_offset_ = 0;  // Offset of the restart array.
+  uint32_t num_restarts_ = 0;    // 0 if malformed.
 };
 
 // A key buffer that holds keys up to kInline bytes without allocating, so

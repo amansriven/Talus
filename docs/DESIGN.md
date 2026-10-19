@@ -21,6 +21,9 @@ components not yet built are absent rather than stubbed.
 | SSTable filter granularity | One filter per table, over all of its user keys, not LevelDB's one filter per 2 KiB of data. | The spec describes a single filter block that lets a read skip the whole table. This is RocksDB's "full filter". A lookup does one probe per table, before any index search. |
 | Index block restart interval | 1 (every index entry is a restart point). | Index lookups binary-search the restart points, so this makes the search cover every entry. Separator keys are short, so the lost prefix compression costs little. |
 | Compressed block kept only if it saves ≥ 12.5% | Otherwise the block is stored uncompressed (type 0). | Same rule as LevelDB: a barely-compressible block costs decompression time on every read for little space. |
+| mmap reads and the block cache | In mmap mode, uncompressed data blocks bypass the block cache and are used in place in the mapping. | A cached block pointing into a mapping would dangle once its table was closed, and the OS page cache already holds the pages. A decompressed LZ4 block owns its memory, so it is cached as usual. |
+| Index and filter blocks | Held by the open `Table` for its lifetime (so they live in the table cache), not in the block cache. | Spec §7 lists them under the table cache: "file handle, parsed index, filter". |
+| Table-cache sharding | 16 shards when `max_open_files ≥ 256`, otherwise 1. Each shard gets `max_open_files / shards`, rounded down. | Rounding down keeps the total within the bound, and a single shard keeps small bounds exact. |
 | WAL write failure | Sticky. Every later write returns the same error. | A failed append can leave a partial record in the log, and recovery would drop every record after it. LevelDB has the same "background error" rule. |
 
 ## 2. Error handling
@@ -341,3 +344,63 @@ filter := bits... | num_probes (1B) | filter_type (1B: 1 = standard, 2 = blocked
 - **Ties.** Equal keys come out in child order (lower index first). Internal keys are unique, so a tie only arises from a duplicated input.
 - **Errors.** If any child reports an error, the merge becomes invalid and returns that error.
 - **Interfaces.** Concrete iterators such as `BlockIter` and the skiplist iterator are used directly where their type is known, and satisfy the `ForwardIterator` concept. The virtual `InternalIterator` interface is used only where children differ in type: memtable, L0 files and levels.
+
+## 9. Caches (`src/cache/`, `src/util/pin.h`, `src/util/buffer_pool.{h,cc}`)
+
+### 9.1 Sharded LRU cache (`lru_cache.h`)
+
+`ShardedLRUCache<Key, Value, Hasher>` is the one template behind both the block cache and the table cache.
+
+- **Shards.** A key's 64-bit hash picks a shard by multiply-shift on its high bits, and a bucket within the shard by its low bits. Each shard is `alignas(kCacheLineSize)`, so two threads in different shards never share a cache line. Each shard has:
+  - its own `std::mutex`;
+  - a capacity of `total / num_shards`;
+  - an intrusive chained hash table that doubles once the shard holds as many entries as it has buckets;
+  - two intrusive lists, as in LevelDB: `lru` holds entries referenced only by the cache, oldest first; `in_use` holds entries pinned by at least one client.
+- **Reference counting.** A cached entry holds one reference for the cache. Each `Lookup` or `Insert` returns a handle holding another.
+  - Pinning moves an entry from `lru` to `in_use`; releasing the last client reference moves it back.
+  - Evicting, erasing or replacing an entry unlinks it at once and drops the cache's reference. The value is destroyed only when the count reaches 0, so a pinned value stays valid after eviction.
+- **Eviction.** Only `lru` entries are evicted, so pinned entries can push usage above capacity. `EvictIfNeeded` runs after every insert and whenever an entry becomes unpinned, so usage returns under capacity as soon as pins are released.
+- **Charging.** Block-cache entries cost their block size in bytes. Table-cache entries cost 1 each, with capacity `max_open_files`.
+- **No allocation on hits.** `Lookup` does a hash, an uncontended lock, a chain walk and a reference increment.
+
+### 9.2 Pins (`pin.h`)
+
+A `Pin` is a move-only object holding up to two `(function, arg, arg)` cleanups inline, which run in reverse order on destruction or `Reset()`. It is how a reader keeps a value alive without copying it, and it never allocates.
+
+A table-cache lookup hands its callback a pin holding:
+1. **The data block:** a block-cache handle, or a heap block owned by the pin when `fill_cache = false`, or nothing for an in-place mmap block.
+2. **The table:** an extra table-cache reference, which keeps the file descriptor or mapping alive.
+
+So `value` stays valid for as long as the pin does, even after the block is evicted and the table is closed. The phase 7 `PinnableValue` is a `std::string_view` plus such a pin.
+
+**Measured:** after warm-up, 100,000 block-cache-hit lookups with the value pinned and then released made **0 heap allocations**, in both pread and mmap modes. A probe replacing global `operator new` counted them. The phase 8 allocation test makes this a permanent check.
+
+### 9.3 Block reads through the cache (`table.cc`, `Table::GetDataBlock`)
+
+For a data block at `offset` in table `file_number`:
+1. **mmap mode.** Read the block (no copy). If it is uncompressed, use it in place; it is valid for the table's lifetime. Otherwise treat it as owned memory and continue with step 4.
+2. **Look up `(file_number, offset)` in the block cache.** On a hit, pin the entry and return it.
+3. **On a miss,** read the block, verify its CRC and decompress it if needed. Its buffer comes from the huge-page pool if one is configured.
+4. **Store or own it.** If `fill_cache` is set, insert it with charge = block size and pin it. Otherwise the pin owns the block outright and frees it on release.
+
+File numbers are never reused, so a deleted table's blocks simply age out of the cache. `TableReadStats` counts block-cache hits and misses, filter checks, and "definitely absent" answers. The DB keeps one per-thread copy of these counters (§10 of the spec).
+
+### 9.4 Table cache (`table_cache.{h,cc}`)
+
+The table cache maps a file number to an open `Table`: its file descriptor or mapping, its parsed index block and its aligned filter.
+- **Misses.** On a miss it opens `NNNNNN.sst` and checks that the file's size equals the size recorded in the manifest, returning `Corruption` if not. Then it parses the table and inserts it.
+- **Failures.** A failed open is not cached, so a later read retries it.
+- **Concurrent misses.** Two threads that miss the same file at once both open it. The second insert replaces the first, which closes once its last pin is released.
+- **Iterators.** `NewIterator` wraps the table iterator together with a table pin. `Evict(file_number)` is called once a file is deleted; readers that still pin the table keep it open.
+- **The bound holds.** A test opens 12 tables through a cache with `max_open_files = 3` and checks, by counting `/dev/fd` entries, that the process never has more than 3 extra descriptors open.
+
+### 9.5 Huge-page buffer pool (`buffer_pool.{h,cc}`)
+
+With `use_huge_pages`, cached blocks are allocated from a `HugePageBufferPool`:
+- **Chunks.** The pool takes 2 MiB chunks from `aligned_alloc(2 MiB)` and advises each with `MADV_HUGEPAGE`, which is a no-op on macOS. Chunks return to the system only when the pool is destroyed.
+- **Size classes.** Requests are rounded up to multiples of 512 bytes, up to 64 KiB. A typical 4 KiB block, which ends up slightly over 4 KiB because a block is flushed only after reaching the target, wastes under 512 bytes. A power-of-two class would waste almost 4 KiB.
+- **Free lists.** Each class has an intrusive free list stored in the freed buffers themselves, so steady-state churn reuses memory and needs no new chunks. A test checks this.
+- **Large requests.** Requests above 64 KiB go to the regular heap.
+- **Locking.** One mutex guards the pool. It is used only on block-cache misses (the I/O path), never on hits.
+
+Arenas get huge pages separately (§4.1). Experiment 6 compares huge pages on and off.

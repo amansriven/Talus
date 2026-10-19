@@ -1,4 +1,5 @@
 add_library(talus
+  cache/table_cache.cc
   db/dbformat.cc
   db/group_commit.cc
   db/log_replay.cc
@@ -12,11 +13,13 @@ add_library(talus
   table/table.cc
   table/table_builder.cc
   util/arena.cc
+  util/buffer_pool.cc
   util/coding.cc
   util/crc32c.cc
   util/crc32c_arm64.cc
   util/crc32c_x86.cc
   util/file.cc
+  util/filename.cc
   util/status.cc
   wal/log_reader.cc
   wal/log_writer.cc

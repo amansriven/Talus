@@ -21,7 +21,8 @@ struct Bytewise {
 using KVs = std::vector<std::pair<std::string, std::string>>;
 
 Block MakeBlock(std::string_view bytes) {
-  auto heap = std::make_unique<char[]>(bytes.size());
+  // An exactly-sized heap buffer, so ASan catches any read past the block.
+  Buffer heap = AllocateBuffer(bytes.size(), /*pool=*/nullptr);
   std::memcpy(heap.get(), bytes.data(), bytes.size());
   BlockContents contents;
   contents.data = std::string_view(heap.get(), bytes.size());

@@ -76,7 +76,7 @@ void CompressBlock(CompressionType type, std::string_view raw, std::string* out)
 
 namespace {
 
-Status DecompressLZ4(std::string_view payload, BlockContents* result) {
+Status DecompressLZ4(std::string_view payload, HugePageBufferPool* pool, BlockContents* result) {
 #if defined(TALUS_HAVE_LZ4)
   uint32_t raw_size = 0;
   if (!GetVarint32(&payload, &raw_size)) {
@@ -87,7 +87,7 @@ Status DecompressLZ4(std::string_view payload, BlockContents* result) {
   if (raw_size > payload.size() * 255 + 16 || payload.size() > std::numeric_limits<int>::max()) {
     return Status::Corruption("bad LZ4 block size");
   }
-  auto buf = std::make_unique_for_overwrite<char[]>(raw_size);
+  Buffer buf = AllocateBuffer(raw_size, pool);
   const int n = LZ4_decompress_safe(payload.data(), buf.get(), static_cast<int>(payload.size()),
                                     static_cast<int>(raw_size));
   if (n < 0 || static_cast<uint32_t>(n) != raw_size) {
@@ -98,6 +98,7 @@ Status DecompressLZ4(std::string_view payload, BlockContents* result) {
   return Status::OK();
 #else
   (void)payload;
+  (void)pool;
   (void)result;
   return Status::Corruption("block is LZ4-compressed but LZ4 support is not built in");
 #endif
@@ -105,15 +106,16 @@ Status DecompressLZ4(std::string_view payload, BlockContents* result) {
 
 }  // namespace
 
-Status ReadBlock(const RandomAccessFile& file, const BlockHandle& handle, BlockContents* result) {
+Status ReadBlock(const RandomAccessFile& file, const BlockHandle& handle, HugePageBufferPool* pool,
+                 BlockContents* result) {
   if (handle.offset > file.size() || handle.size > file.size() ||
       handle.size + kBlockTrailerSize > file.size() - handle.offset) {
     return Status::Corruption("block handle beyond end of file");
   }
   const auto n = static_cast<size_t>(handle.size);
-  std::unique_ptr<char[]> buf;
+  Buffer buf;
   if (!file.is_mmap()) {
-    buf = std::make_unique_for_overwrite<char[]>(n + kBlockTrailerSize);
+    buf = AllocateBuffer(n + kBlockTrailerSize, pool);
   }
   std::string_view contents;
   Status s = file.Read(handle.offset, n + kBlockTrailerSize, &contents, buf.get());
@@ -135,7 +137,7 @@ Status ReadBlock(const RandomAccessFile& file, const BlockHandle& handle, BlockC
       result->heap = std::move(buf);
       return Status::OK();
     case CompressionType::kLZ4:
-      return DecompressLZ4(std::string_view(data, n), result);
+      return DecompressLZ4(std::string_view(data, n), pool, result);
   }
   return Status::Corruption("unknown block compression type");
 }

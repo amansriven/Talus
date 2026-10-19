@@ -83,7 +83,7 @@ Status BuildTable(const std::string& path, const Entries& entries, const TableOp
 Status OpenTable(const std::string& path, RandomAccessFile::Mode mode, std::unique_ptr<Table>* t) {
   std::unique_ptr<RandomAccessFile> file;
   Status s = RandomAccessFile::Open(path, mode, &file);
-  return s.ok() ? Table::Open(std::move(file), t) : s;
+  return s.ok() ? Table::Open(TableOpenOptions{}, std::move(file), t) : s;
 }
 
 // Parameters: (read mode, filter type, block size).
@@ -166,8 +166,9 @@ TEST_P(TableTest, InternalGetFindsNewestVisibleVersion) {
     const LookupKey lkey(parsed.user_key, parsed.sequence);
     bool called = false;
     ASSERT_TRUE(table
-                    ->InternalGet(lkey.internal_key(),
-                                  [&](std::string_view found_key, std::string_view found_value) {
+                    ->InternalGet(lkey.internal_key(), TableReadOptions{},
+                                  [&](std::string_view found_key, std::string_view found_value,
+                                      Pin& /*pin*/) {
                                     called = true;
                                     EXPECT_EQ(found_key, k);
                                     EXPECT_EQ(found_value, v);
@@ -185,8 +186,8 @@ TEST_P(TableTest, InternalGetFindsNewestVisibleVersion) {
     const LookupKey lkey(user_key, kMaxSequenceNumber);
     bool called = false;
     ASSERT_TRUE(table
-                    ->InternalGet(lkey.internal_key(),
-                                  [&](std::string_view found_key, std::string_view) {
+                    ->InternalGet(lkey.internal_key(), TableReadOptions{},
+                                  [&](std::string_view found_key, std::string_view, Pin& /*pin*/) {
                                     called = true;
                                     EXPECT_NE(ExtractUserKey(found_key), user_key);
                                   })
