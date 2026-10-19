@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
 #include <string>
 
 #include "Talus/options.h"
@@ -37,10 +38,26 @@ class Writer;
 // every later Write() returns it.
 class GroupCommitter {
  public:
-  // `log` and `mem` must outlive this object. `last_sequence` is the newest
-  // sequence number already used (e.g. the maximum found by recovery).
+  // Run by each leader before it forms its group, while it holds
+  // leadership, so no other write is in progress. The DB uses it to stall
+  // writers and to switch to a new memtable and WAL (through SetTarget()). A
+  // non-OK result fails the would-be group's writes.
+  using PrepareFn = std::function<Status()>;
+
+  // `log` and `mem` must outlive this object, or be replaced through
+  // SetTarget() first. `last_sequence` is the newest sequence number already
+  // used (e.g. the maximum found by recovery).
   GroupCommitter(log::Writer* log, MemTable* mem, SequenceNumber last_sequence,
-                 int spin_iterations = WriteThread::kDefaultSpinIterations);
+                 int spin_iterations = WriteThread::kDefaultSpinIterations,
+                 PrepareFn prepare = nullptr);
+
+  // Redirects later groups to a new WAL and memtable. Only from PrepareFn:
+  // the previous group has finished and the next has not started, so no
+  // write is touching either.
+  void SetTarget(log::Writer* log, MemTable* mem) {
+    log_ = log;
+    mem_ = mem;
+  }
 
   GroupCommitter(const GroupCommitter&) = delete;
   GroupCommitter& operator=(const GroupCommitter&) = delete;
@@ -62,11 +79,14 @@ class GroupCommitter {
   void Publish(SequenceNumber seq) { visible_sequence_.store(seq, std::memory_order_release); }
 
   WriteThread write_thread_;
-  log::Writer* const log_;
-  MemTable* const mem_;
+  const PrepareFn prepare_;
 
-  // Leader-only state. Leadership handoff in WriteThread provides the
-  // release/acquire ordering, so no lock is needed.
+  // Leader-only state, including log_ and mem_. Leadership handoff in
+  // WriteThread provides the release/acquire ordering, so no lock is needed.
+  // Parallel followers read mem_ after the leader's SetState(release) wakes
+  // them.
+  log::Writer* log_;
+  MemTable* mem_;
   SequenceNumber last_sequence_;
   Status error_;        // Sticky WAL error.
   std::string merged_;  // Reused buffer for multi-writer WAL records.

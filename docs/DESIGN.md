@@ -24,6 +24,12 @@ components not yet built are absent rather than stubbed.
 | mmap reads and the block cache | In mmap mode, uncompressed data blocks bypass the block cache and are used in place in the mapping. | A cached block pointing into a mapping would dangle once its table was closed, and the OS page cache already holds the pages. A decompressed LZ4 block owns its memory, so it is cached as usual. |
 | Index and filter blocks | Held by the open `Table` for its lifetime (so they live in the table cache), not in the block cache. | Spec §7 lists them under the table cache: "file handle, parsed index, filter". |
 | Table-cache sharding | 16 shards when `max_open_files ≥ 256`, otherwise 1. Each shard gets `max_open_files / shards`, rounded down. | Rounding down keeps the total within the bound, and a single shard keeps small bounds exact. |
+| Opening a database that does not exist | Fails unless `create_if_missing` is set; `error_if_exists` is also honored. A `LOCK` file (`flock`) rejects a second concurrent open with `Busy`. | These match LevelDB; the spec does not define Open's behavior. |
+| MVCC drop rule | LevelDB's: an entry is dropped if a newer entry of the same key is at or below the *smallest* live snapshot, and a tombstone is dropped if it is at or below that snapshot and no deeper level may hold the key. | This keeps every version any live snapshot can see, as the spec requires, and sometimes a little more. A per-snapshot-stripe rule would reclaim more space under many snapshots, but it is more complex. |
+| Compaction output boundaries | An output file ends only between two user keys, never between versions of the same key. | Then each user key in L1+ lives in exactly one file. This prevents LevelDB's old bug where newer versions of a key were compacted below older ones (later fixed with "boundary inputs"). `VersionSet` rejects any version that breaks the rule. |
+| Corrupt record in an older WAL during recovery | Replay of that WAL stops at the record, and replay continues with later WALs. | This matches LevelDB. "Everything after it" is read as the rest of that file. |
+| Empty `CompactRange` bounds | An empty `begin` or `end` means unbounded. | `std::string_view` has no null value. |
+| Which L0 file is newest | L0 is ordered by file number, which grows over time. | Flushes always write to L0 and compactions never do, so a higher number is always newer data. |
 | WAL write failure | Sticky. Every later write returns the same error. | A failed append can leave a partial record in the log, and recovery would drop every record after it. LevelDB has the same "background error" rule. |
 
 ## 2. Error handling
@@ -404,3 +410,181 @@ With `use_huge_pages`, cached blocks are allocated from a `HugePageBufferPool`:
 - **Locking.** One mutex guards the pool. It is used only on block-cache misses (the I/O path), never on hits.
 
 Arenas get huge pages separately (§4.1). Experiment 6 compares huge pages on and off.
+
+## 10. Database directory, versions and the MANIFEST (`src/version/`, `src/util/filename.*`)
+
+### 10.1 Files
+
+| Name | Contents |
+|---|---|
+| `NNNNNN.log` | WAL (§7.2). One per memtable. |
+| `NNNNNN.sst` | SSTable (§8). |
+| `MANIFEST-NNNNNN` | A log of `VersionEdit` records in the WAL record format. |
+| `CURRENT` | The text `MANIFEST-NNNNNN\n`, naming the live MANIFEST. |
+| `LOCK` | Held with `flock(LOCK_EX)` while the database is open. |
+| `NNNNNN.dbtmp` | A staging file for `CURRENT`. |
+
+All numbered files share one counter (`next_file_number`), so numbers are never reused.
+
+**Atomic `CURRENT` update (`SetCurrentFile`).**
+1. Write the new contents to `NNNNNN.dbtmp`.
+2. fsync it, then close it.
+3. `rename` it over `CURRENT`.
+4. fsync the directory.
+
+A crash leaves either the old `CURRENT` or the new one, never a partial file.
+
+### 10.2 VersionEdit encoding
+
+A record is a sequence of `varint32 tag` fields, each followed by its payload:
+
+| Tag | Field | Payload |
+|---|---|---|
+| 1 | log number | varint64: WALs below this number are no longer needed |
+| 2 | next file number | varint64 |
+| 3 | last sequence | varint64, ≤ 2^56 − 1 |
+| 4 | compact pointer | varint32 level, length-prefixed internal key |
+| 5 | deleted file | varint32 level, varint64 file number |
+| 6 | new file | varint32 level, varint64 number, varint64 file size, length-prefixed smallest internal key, length-prefixed largest internal key |
+
+Decoding is strict. An unknown tag, a truncated field, a level ≥ 64, an internal key shorter than 8 bytes, or a sequence above 2^56 − 1 is `Corruption`.
+
+### 10.3 Versions
+
+A `Version` is an immutable set of files per level, shared through `shared_ptr`.
+- **L0** is sorted by file number; its files may overlap.
+- **L1 and below** are sorted by key and strictly non-overlapping *by user key*: `user(largest[i]) < user(smallest[i+1])`. `VersionSet::Apply` rejects any edit that would break this, reporting `Corruption` during recovery.
+
+**Live-file registry.** `FileMetaData` objects are shared among Versions. Each one adds its file number to a registry (`LiveFiles`) when constructed and removes it when destroyed. A table file is therefore referenced by a live Version exactly when its number is in the registry. Combined with the set of outputs still being written, that gives the exact set of tables that must not be deleted.
+
+**Compaction scores** are computed when a Version is created:
+- for L0: `files / l0_compaction_trigger`;
+- for Ln (n ≥ 1): `bytes / (l1_max_bytes × multiplier^(n−1))`.
+
+### 10.4 MANIFEST protocol (`VersionSet::LogAndApply`)
+
+Requires the DB mutex; concurrent callers are serialized.
+1. Fill in the edit's `next_file_number` and `last_sequence`, and its `log_number` if it has none.
+2. Build the new Version in memory and check the level invariants.
+3. If this is the first edit since `Open`, allocate a new MANIFEST number. Encode a full snapshot of the current state as an edit (every file and compact pointer) to write first.
+4. Release the mutex, then:
+   1. append the snapshot (new MANIFEST only) and the edit;
+   2. fsync;
+   3. for a new MANIFEST, update `CURRENT` atomically (§10.1).
+5. Retake the mutex. On success, install the new Version. On failure, keep the old Version and drop the MANIFEST writer, so the next edit starts a fresh MANIFEST instead of appending after a possibly partial record.
+
+**Recovery (`VersionSet::Recover`).**
+- Read `CURRENT`, then replay every MANIFEST record in order.
+- A torn final record is ignored: that edit was never acknowledged.
+- Any other bad record is `Corruption`.
+- A MANIFEST without a log number, next file number or last sequence is `Corruption`.
+
+## 11. Engine (`src/db/db_impl.{h,cc}`)
+
+### 11.1 Open and recovery
+
+1. Validate options.
+2. Create the directory if allowed, and take the `LOCK`.
+3. If `CURRENT` is missing, create `MANIFEST-000001` and `CURRENT`.
+4. Recover the VersionSet (§10.4). Check that every table it references exists; a missing table is `Corruption`.
+5. Replay every WAL numbered at or above the MANIFEST's log number, oldest first, into a memtable (§7.2). Flush to an L0 table whenever the memtable exceeds `memtable_size`, and once more at the end.
+6. fsync the directory if tables were written.
+7. Create a new WAL, and fsync the directory.
+8. In one `LogAndApply`, add the new L0 files, set the log number to the new WAL (making every replayed WAL obsolete) and record the last sequence. The last sequence is the larger of the MANIFEST's value and the largest sequence replayed.
+9. Install a SuperVersion, delete obsolete files (including stray `.dbtmp` files), and start the background threads.
+
+**Crash at any step.** A crash during recovery redoes the same work on the next open:
+- the replayed WALs still exist until step 8 is durable;
+- tables written before the crash are not in the MANIFEST, so they count as obsolete and are deleted.
+
+### 11.2 Memtable switching and write stalls (`MakeRoomForWrite`)
+
+The group-commit leader runs this before forming each group (§7.4), so no write is in progress while it runs. With the DB mutex held, it loops:
+1. **Background error.** Return it: the error is sticky.
+2. **Slowdown.** If L0 has ≥ `l0_slowdown_trigger` files, sleep 1 ms, once per group.
+3. **Room left.** If the memtable is below `memtable_size` (and no flush was requested), return.
+4. **Previous flush pending.** If an immutable memtable is still being flushed, wait for it. Only one may be pending.
+5. **Stop.** If L0 has ≥ `l0_stop_trigger` files, wait for compaction.
+6. **Switch.**
+   1. Create the new WAL and fsync the directory.
+   2. Close the old WAL.
+   3. Make the memtable immutable and create a new one.
+   4. Point the GroupCommitter at the new WAL and memtable.
+   5. Install a new SuperVersion and wake the flush thread.
+
+Every wait in steps 2, 4 and 5 counts as a stall (`stall_count`, `stall_micros`).
+
+`Flush()` sets a flag and writes an empty batch. The leader that handles it switches memtables if the current one is not empty. `Flush()` then waits until every memtable switched so far has been flushed.
+
+### 11.3 SuperVersion and the lock-free read path (`src/db/super_version.*`)
+
+**Install.** On every memtable switch, flush and compaction, the DB builds a new `SuperVersion` (`{mem, imm, version}`) under its mutex, gives it the next generation number, and publishes the generation with `store(release)`. It then drops its reference to the old SuperVersion. SuperVersions are intrusively reference-counted:
+- `Ref`: `fetch_add(relaxed)`, which is safe because the caller already holds a reference or the mutex;
+- `Unref`: `fetch_sub(acq_rel)`, where the thread that drops the last reference deletes it.
+
+**Per-thread cache.** `PerThreadState` gives each (thread, DB) pair a cache-line-aligned `ThreadSlot` holding a cached SuperVersion reference, its generation, and the thread's statistics counters. `Get`:
+1. Loads the **visible sequence first** (acquire). See the ordering argument below.
+2. Loads the global generation (acquire). If it equals the slot's cached generation, uses the cached SuperVersion. This **fast path** takes no mutex and no reference count: the slot's own reference keeps it alive, and only this thread can drop that reference.
+3. Otherwise takes the DB mutex once to reference the current SuperVersion. It drops the old one after unlocking, since that may free a memtable. Each acquisition is counted as fast or slow.
+
+**Why the sequence must be loaded first.** A write that lands in a newer memtable is published (release store of its sequence) only after that memtable's SuperVersion was installed (release store of its generation).
+- With the sequence loaded first: if it covers the write, the acquire load synchronizes with the publish. The generation install happened before that publish, so the generation check sees the new generation and takes the slow path.
+- In the opposite order, a reader could see the old generation, then a sequence covering a write that only the new memtable holds, and miss a committed write.
+
+**Lifetime.**
+- *Thread exit.* A `thread_local` destructor releases the thread's cached references and folds its counters into per-DB totals for exited threads. A global registry, behind one mutex taken only off the fast path, tracks every thread's slots.
+- *DB destruction.* The destructor releases the DB's slot in every live thread. DB indexes are reused only after this cleanup, so a stale slot can never match a new DB.
+
+**Statistics.**
+- *Writes.* Each counter is written by its owning thread alone, as a relaxed load followed by a relaxed store. That avoids a locked read-modify-write instruction and needs no shared atomic.
+- *Reads.* `GetInternalStats` sums all slots.
+- *Check.* A test confirms that 1,000 steady-state lookups on one thread take exactly 1 slow-path acquisition and 999 fast ones.
+
+**Read order.** Active memtable, immutable memtable, then the Version:
+- L0 files containing the key, newest first;
+- then one binary-searched file per deeper level, skipping tables whose bloom filter rules the key out.
+
+Readers never wait for flush or compaction.
+
+### 11.4 Background work
+
+- **Threads.**
+  - A dedicated **flush thread** waits for an immutable memtable. Flush never queues behind compaction, which gives it priority.
+  - `max_background_compactions` **compaction threads** each pick the highest-scoring compaction whose input and output levels are not reserved by another running compaction.
+  - All threads are pinned to `background_thread_cpus` on Linux.
+- **Flush.**
+  1. Build an L0 table from the immutable memtable: write it, fsync it, close it, then fsync the directory.
+  2. `LogAndApply` adds the file and sets the log number to the current WAL, which makes the immutable memtable's WALs obsolete.
+  3. Install a SuperVersion and delete obsolete files.
+- **Compaction picking.**
+  1. Take the level with the highest score ≥ 1.
+  2. Its first input is the first file past that level's round-robin compaction pointer, wrapping around. For L0, add every L0 file overlapping it, transitively.
+  3. Add every file in level + 1 overlapping the inputs' user-key range.
+  4. Advance the pointer to the inputs' largest key, and record it in the edit.
+- **Compaction execution.**
+  - *Input.* A k-way heap merge (§8.6) over all input tables, read with `fill_cache = false`.
+  - *Drop rules.* LevelDB's (§1), measured against the smallest live snapshot. With no snapshots, that is the current visible sequence.
+  - *Output splitting.* A new user key may start a new output when the current one has reached `target_file_size`, or when it overlaps more than 10 × `target_file_size` bytes of level + 2. Outputs never split between versions of a key.
+  - *Rate limiting.* Every byte written is charged to the rate limiter as data blocks reach the file.
+  - *Install.* After syncing the outputs and the directory, one `LogAndApply` deletes the inputs and adds the outputs.
+  - *Cleanup.* The compaction object, which holds its input Version, is destroyed before obsolete files are deleted. Otherwise its own inputs would survive until the next background job.
+- **Rate limiter (`src/util/rate_limiter.*`).** A token bucket: tokens accrue at the configured rate, up to 1 ms worth. A request takes tokens and may go into debt, and a caller in debt sleeps until the debt is repaid. The small bucket keeps output paced at block granularity rather than in bursts. A test checks that no 25 ms window exceeds its share of the rate plus a few blocks. Time spent waiting is counted.
+- **`CompactRange(begin, end)`.** Flushes, then compacts each level from 0 up to the deepest level holding data in the range into the next one, until no file at that level overlaps the range. It runs on the calling thread, taking the same level reservations as background compactions.
+- **Errors.** A failed flush or compaction sets a sticky background error. After that, writes fail and background work and file deletion stop. Shutdown abandons an in-progress compaction without recording an error.
+
+### 11.5 Obsolete files
+
+`DeleteObsoleteFiles` runs after each successful flush or compaction, and at open. It computes:
+- **live tables:** the live-file registry plus outputs still being written;
+- the MANIFEST's log number;
+- the current MANIFEST's number.
+
+It then deletes:
+- tables not in the live set (evicting them from the table cache);
+- WALs below the log number;
+- MANIFESTs older than the current one;
+- `.dbtmp` files, at open only, since a running `LogAndApply` may be using one.
+
+**Why deletion is safe.** A file leaves the registry only when the last Version holding it is destroyed. A Version that drops a file is installed only after the edit removing the file is durable. So a file is never deleted before the MANIFEST no longer needs it. The deletion itself runs without the mutex: new files always get numbers above every existing file, so nothing on the delete list can become live meanwhile.
+
+**Stale readers.** A reader thread caching an old SuperVersion keeps that SuperVersion's files on disk until it refreshes. The files are deleted by a later cleanup.

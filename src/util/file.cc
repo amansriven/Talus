@@ -1,6 +1,8 @@
 #include "util/file.h"
 
+#include <dirent.h>
 #include <fcntl.h>
+#include <sys/file.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -299,6 +301,65 @@ Status SyncDirectory(const std::string& dir) {
   Status s = SyncFd(fd, dir);
   Status close_status = owned.Close(dir);
   return s.ok() ? close_status : s;
+}
+
+}  // namespace talus
+
+namespace talus {
+
+Status CreateDirIfMissing(const std::string& dir) {
+  if (::mkdir(dir.c_str(), 0755) != 0 && errno != EEXIST) {
+    return PosixError(dir, errno);
+  }
+  return Status::OK();
+}
+
+bool FileExists(const std::string& path) { return ::access(path.c_str(), F_OK) == 0; }
+
+Status GetChildren(const std::string& dir, std::vector<std::string>* names) {
+  names->clear();
+  DIR* d = ::opendir(dir.c_str());
+  if (d == nullptr) {
+    return PosixError(dir, errno);
+  }
+  while (const struct dirent* entry = ::readdir(d)) {
+    const std::string_view name = entry->d_name;
+    if (name != "." && name != "..") {
+      names->emplace_back(name);
+    }
+  }
+  ::closedir(d);
+  return Status::OK();
+}
+
+Status RemoveFile(const std::string& path) {
+  if (::unlink(path.c_str()) != 0) {
+    return PosixError(path, errno);
+  }
+  return Status::OK();
+}
+
+Status RenameFile(const std::string& from, const std::string& to) {
+  if (::rename(from.c_str(), to.c_str()) != 0) {
+    return PosixError(from, errno);
+  }
+  return Status::OK();
+}
+
+Status FileLock::Acquire(const std::string& path, std::unique_ptr<FileLock>* lock) {
+  const int fd = ::open(path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+  if (fd < 0) {
+    return PosixError(path, errno);
+  }
+  FileDescriptor owned(fd);
+  if (::flock(fd, LOCK_EX | LOCK_NB) != 0) {
+    if (errno == EWOULDBLOCK) {
+      return Status::Busy(path, "database is locked by another instance");
+    }
+    return PosixError(path, errno);
+  }
+  *lock = std::make_unique<FileLock>(PrivateTag{}, std::move(owned));
+  return Status::OK();
 }
 
 }  // namespace talus

@@ -3,6 +3,7 @@
 // Small platform abstractions shared across the engine.
 
 #include <cstddef>
+#include <vector>
 
 namespace talus {
 
@@ -28,6 +29,11 @@ inline void CpuRelax() {
   asm volatile("yield" ::: "memory");
 #endif
 }
+
+// Restricts the calling thread to `cpus` (Linux sched affinity). A no-op on
+// other platforms or for an empty list: affinity is an optimization, never
+// required for correctness.
+void PinCurrentThreadToCpus(const std::vector<int>& cpus);
 
 }  // namespace talus
 

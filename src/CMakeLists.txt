@@ -1,8 +1,10 @@
 add_library(talus
   cache/table_cache.cc
+  db/db_impl.cc
   db/dbformat.cc
   db/group_commit.cc
   db/log_replay.cc
+  db/super_version.cc
   db/write_batch.cc
   db/write_thread.cc
   memtable/memtable.cc
@@ -20,7 +22,11 @@ add_library(talus
   util/crc32c_x86.cc
   util/file.cc
   util/filename.cc
+  util/port.cc
+  util/rate_limiter.cc
   util/status.cc
+  version/version_edit.cc
+  version/version_set.cc
   wal/log_reader.cc
   wal/log_writer.cc
 )

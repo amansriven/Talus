@@ -6,6 +6,7 @@ add_executable(talus_unit_tests
   unit/buffer_pool_test.cc
   unit/coding_test.cc
   unit/crc32c_test.cc
+  unit/db_test.cc
   unit/dbformat_test.cc
   unit/filter_test.cc
   unit/group_commit_test.cc
@@ -15,10 +16,13 @@ add_executable(talus_unit_tests
   unit/lru_cache_test.cc
   unit/memtable_test.cc
   unit/merging_iterator_test.cc
+  unit/rate_limiter_test.cc
   unit/skiplist_test.cc
   unit/status_test.cc
   unit/table_cache_test.cc
   unit/table_test.cc
+  unit/version_edit_test.cc
+  unit/version_set_test.cc
   unit/write_batch_test.cc
 )
 target_include_directories(talus_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/src)

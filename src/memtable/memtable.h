@@ -42,6 +42,12 @@ class MemTable {
 
   bool concurrent_writes() const { return concurrent_writes_; }
 
+  bool Empty() const {
+    Iterator iter = NewIterator();
+    iter.SeekToFirst();
+    return !iter.Valid();
+  }
+
   // Bytes of arena memory reserved so far; used to decide when to switch to
   // a new memtable.
   size_t ApproximateMemoryUsage() const { return arena_.MemoryUsage(); }

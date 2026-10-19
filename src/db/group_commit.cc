@@ -1,5 +1,7 @@
 #include "db/group_commit.h"
 
+#include <utility>
+
 #include "db/write_batch_internal.h"
 #include "memtable/memtable.h"
 #include "wal/log_writer.h"
@@ -7,8 +9,9 @@
 namespace talus {
 
 GroupCommitter::GroupCommitter(log::Writer* log, MemTable* mem, SequenceNumber last_sequence,
-                               int spin_iterations)
+                               int spin_iterations, PrepareFn prepare)
     : write_thread_(spin_iterations),
+      prepare_(std::move(prepare)),
       log_(log),
       mem_(mem),
       last_sequence_(last_sequence),
@@ -26,11 +29,15 @@ Status GroupCommitter::Write(const WriteOptions& options, WriteBatch* batch) {
     return w.status;
   }
 
-  // We lead a group.
+  // We lead. Prepare first, so writers arriving during a stall still join
+  // this group.
+  Status s = error_;
+  if (s.ok() && prepare_) {
+    s = prepare_();
+  }
   WriteThread::WriteGroup group;
   write_thread_.EnterAsBatchGroupLeader(&w, &group);
 
-  Status s = error_;
   if (s.ok()) {
     SequenceNumber next = last_sequence_ + 1;
     bool need_sync = false;

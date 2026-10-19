@@ -7,6 +7,8 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 #include "Talus/status.h"
 
@@ -155,5 +157,28 @@ class RandomAccessFile {
 // fsyncs a directory, making the creation, deletion or renaming of entries
 // in it durable.
 Status SyncDirectory(const std::string& dir);
+
+Status CreateDirIfMissing(const std::string& dir);
+bool FileExists(const std::string& path);
+// The names (not paths) of the entries in `dir`, excluding "." and "..".
+Status GetChildren(const std::string& dir, std::vector<std::string>* names);
+Status RemoveFile(const std::string& path);
+// Atomically replaces `to` with `from` (rename(2)).
+Status RenameFile(const std::string& from, const std::string& to);
+
+// An exclusive advisory lock on a file (flock), held until destruction.
+// Prevents two DB instances, in this or another process, from opening the
+// same database.
+class FileLock {
+  struct PrivateTag {};
+
+ public:
+  // Returns Busy if another holder has the lock.
+  static Status Acquire(const std::string& path, std::unique_ptr<FileLock>* lock);
+  FileLock(PrivateTag, FileDescriptor fd) : fd_(std::move(fd)) {}
+
+ private:
+  FileDescriptor fd_;  // Closing it releases the lock.
+};
 
 }  // namespace talus
