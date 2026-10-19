@@ -35,14 +35,16 @@ jobs:
         run: ctest --preset ${{ matrix.preset }}
 
   macos:
-    name: macos / release
+    name: macos / release (+LZ4)
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - name: Install tools
         run: brew install ninja
       - name: Configure
-        run: cmake --preset release
+        # LZ4 is optional; enabling it here keeps the compressed-block path
+        # tested, while the Linux jobs cover the default build without it.
+        run: cmake --preset release -DTalus_WITH_LZ4=ON
       - name: Build
         run: cmake --build --preset release
       - name: Test

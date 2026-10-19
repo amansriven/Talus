@@ -116,6 +116,42 @@ class SequentialFile {
   size_t buffer_len_ = 0;
 };
 
+// A read-only file for positional reads (SSTables), using either pread(2)
+// or a read-only mmap of the whole file. Thread-safe.
+class RandomAccessFile {
+  struct PrivateTag {};
+
+ public:
+  enum class Mode { kPread, kMmap };
+
+  static Status Open(const std::string& path, Mode mode, std::unique_ptr<RandomAccessFile>* result);
+
+  // Use Open(). (Public only so std::make_unique can call it.)
+  RandomAccessFile(PrivateTag, FileDescriptor fd, std::string path, uint64_t size,
+                   const char* mapping);
+  ~RandomAccessFile();
+
+  RandomAccessFile(const RandomAccessFile&) = delete;
+  RandomAccessFile& operator=(const RandomAccessFile&) = delete;
+
+  // Reads up to `n` bytes at `offset`; *result is shorter only at end of
+  // file. With pread the bytes are copied into `scratch` (room for `n`) and
+  // *result points there. With mmap *result points into the mapping
+  // (zero-copy) and `scratch` is unused.
+  Status Read(uint64_t offset, size_t n, std::string_view* result, char* scratch) const;
+
+  uint64_t size() const { return size_; }
+  // True if Read() returns pointers into a mapping that lives as long as
+  // this object, so callers need not copy.
+  bool is_mmap() const { return mapping_ != nullptr; }
+
+ private:
+  FileDescriptor fd_;
+  const std::string path_;
+  const uint64_t size_;
+  const char* const mapping_;  // Null in pread mode (and for empty files).
+};
+
 // fsyncs a directory, making the creation, deletion or renaming of entries
 // in it durable.
 Status SyncDirectory(const std::string& dir);

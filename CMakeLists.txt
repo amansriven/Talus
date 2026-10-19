@@ -30,11 +30,11 @@ add_library(talus_warnings INTERFACE)
 target_compile_options(talus_warnings INTERFACE -Wall -Wextra -Wpedantic -Werror)
 
 find_package(Threads REQUIRED)
+include(cmake/Dependencies.cmake)
 
 add_subdirectory(src)
 
 if(Talus_BUILD_TESTS)
   enable_testing()
-  include(cmake/Dependencies.cmake)
   add_subdirectory(tests)
 endif()

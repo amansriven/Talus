@@ -18,6 +18,9 @@ components not yet built are absent rather than stubbed.
 | Torn WAL tail with `paranoid_checks` | Still a clean end of log, not `Corruption`. Only a complete record that fails its checksum, has an unknown type or holds a malformed batch is corruption. | This matches LevelDB. A torn tail is the normal result of a crash, so reporting it would make every crash unrecoverable in paranoid mode. |
 | WAL length field pointing past end of file | Treated as a torn tail (end of log). | It can't be told apart from a crash mid-write. Checking it against the file size first also stops a corrupt length from causing a huge allocation. |
 | Sync and non-sync writes in one group | Allowed. The group fsyncs if any member asked for sync. | The spec says so explicitly. LevelDB instead keeps sync writes out of a non-sync leader's group. |
+| SSTable filter granularity | One filter per table, over all of its user keys, not LevelDB's one filter per 2 KiB of data. | The spec describes a single filter block that lets a read skip the whole table. This is RocksDB's "full filter". A lookup does one probe per table, before any index search. |
+| Index block restart interval | 1 (every index entry is a restart point). | Index lookups binary-search the restart points, so this makes the search cover every entry. Separator keys are short, so the lost prefix compression costs little. |
+| Compressed block kept only if it saves ≥ 12.5% | Otherwise the block is stored uncompressed (type 0). | Same rule as LevelDB: a barely-compressible block costs decompression time on every read for little space. |
 | WAL write failure | Sticky. Every later write returns the same error. | A failed append can leave a partial record in the log, and recovery would drop every record after it. LevelDB has the same "background error" rule. |
 
 ## 2. Error handling
@@ -240,3 +243,101 @@ So `notify_one()` never runs on a destroyed object. The tests run every group-co
 **Spin threshold.** The default is 256 polls, roughly 1–10 µs depending on the CPU's PAUSE/YIELD latency. That is about the time of one group's `write(2)` plus its memtable inserts. Waits that short stay in user space, while waits for an fsync (milliseconds) go to the kernel. This is a starting value, not yet a measurement. Experiment 1 in `PERFORMANCE.md` sweeps it against sync-write throughput and p99, and this paragraph will be updated with the result.
 
 **Early observation, not a benchmark.** On an Apple M3 with 8 threads writing one-op, 100-byte batches, groups averaged 4 writers, with a maximum of 8. 400 sync writes needed 93–99 fsyncs. Parallel memtable inserts were slower than leader-only inserts for these tiny batches (about 200k vs 320k writes/s), so waking followers seems to cost more than one small insert. Experiment 2 will measure this properly.
+
+## 8. SSTable format (`NNNNNN.sst`, `src/table/`)
+
+### 8.1 File layout
+
+```
+[data block 0] ... [data block N-1] [filter block] [index block] [footer]
+```
+
+- **Block trailer.** Every block, the filter and index included, is followed by a 5-byte trailer:
+  ```
+  compression_type (1B: 0 = none, 1 = LZ4) | masked crc32c (fixed32)
+  ```
+  The CRC covers the stored block bytes plus the type byte. `ReadBlock` verifies it on **every** read from disk, then decompresses the block if needed. A bad checksum, an unknown type or a handle beyond the end of the file is `Corruption`.
+- **Block handle.** `BlockHandle = varint64 offset | varint64 size`, where `size` excludes the trailer.
+- **Footer.** The footer is the last 48 bytes of the file:
+
+  | Offset | Size | Field |
+  |---|---|---|
+  | 0 | ≤ 20 | filter handle (size 0 if the table has no filter) |
+  | after it | ≤ 20 | index handle |
+  | up to 40 | – | zero padding |
+  | 40 | 8 | magic, fixed64 `0x54535373756C6154`: the bytes `"TalusSST"` |
+
+  Data blocks come first, then the filter, then the index. So `filter.offset + filter.size + 5 == index.offset`, and `index.offset + index.size + 5 == file_size - 48`; a test checks both.
+- **LZ4 blocks.** With `-DTalus_WITH_LZ4=ON`, a compressed block's bytes are `varint32 uncompressed_size | LZ4 block-format data`. A reader rejects a claimed size above `255 × compressed + 16` before allocating, which is LZ4's maximum expansion. A build without LZ4 reports such a block as `Corruption`, and refuses to write LZ4 tables (`InvalidArgument`).
+
+### 8.2 Blocks (`block_builder.{h,cc}`, `block.{h,cc}`)
+
+Data and index blocks share one format:
+
+```
+entry   := varint32 shared | varint32 non_shared | varint32 value_len | key[shared:] | value
+block   := entry* | fixed32 restart_offset[num_restarts] | fixed32 num_restarts
+```
+
+- **Prefix compression.** `shared` is the length of the prefix this key shares with the previous key. Every `block_restart_interval` entries (16 by default), an entry is a **restart point**: it stores its full key (`shared = 0`) and its offset goes into the restart array. The first entry is always a restart point. An empty block is `fixed32 0 | fixed32 1`.
+- **`Seek(target)`.** The reader binary-searches the restart points for the last one whose key is less than `target`, then scans forward. Each restart key is read in place, with no copy.
+- **Rebuilding keys.** The iterator rebuilds the current key in a `KeyBuffer`, which stores keys of up to 128 bytes in place, so iterating a cached block doesn't allocate.
+- **Malformed blocks.** The reader never reads outside the block. Any of the following makes the iterator invalid with `Corruption`:
+  - `num_restarts` is 0 or doesn't fit in the block;
+  - a varint or length overruns the entry area;
+  - a restart offset is out of range;
+  - a restart entry has `shared ≠ 0`;
+  - a key is shorter than the comparator's minimum (8 bytes for internal keys).
+- **Fuzz check.** A test applies 2,000 random multi-byte corruptions under ASan.
+
+### 8.3 Index block
+
+The index has one entry per data block. Its value is the block's `BlockHandle`. Its key is a separator: an internal key `k` with `last_key(block i) ≤ k < first_key(block i+1)`. The last block's key is a successor: `k ≥ last_key`.
+
+- **Shortening.** `InternalKeyComparator::FindShortestSeparator` shortens the user key bytewise (it increments the first differing byte, if that stays below the limit) and appends the largest tag, `(2^56 − 1) << 8 | 1`. A test checks the bounds over 20,000 random key pairs.
+- **Search.** The index block has restart interval 1, so a lookup's binary search covers every entry.
+
+### 8.4 Filter block (`filter_policy.{h,cc}`)
+
+The filter block holds one filter over `Hash64(user_key)` for every distinct user key in the table:
+
+```
+filter := bits... | num_probes (1B) | filter_type (1B: 1 = standard, 2 = blocked)
+```
+
+- **Dispatch.** Readers dispatch on `filter_type` with a switch. Both policies satisfy the `FilterPolicy` concept: static `Build`, `MayContain` and `Validate`, with no virtual calls.
+- **Validation.** `Table::Open` validates the trailer and the size. A malformed filter could give false negatives, which would mean wrong `NotFound` results, so such a table is rejected with `Corruption`.
+- **Alignment.** `Table::Open` copies the filter into a 64-byte-aligned buffer.
+
+**Cache-line-blocked bloom** (the default):
+- *Layout.* `bits` is `num_blocks × 64` bytes, with `num_blocks = max(1, ceil(n × bits_per_key / 512))`.
+- *Block choice.* For hash `h`, the block is `((h >> 32) × num_blocks) >> 32` (multiply-shift, no division).
+- *Probes.* With `h2 = (uint32) h`, probe `i` tests bit `h2 >> 23` (0–511) of that block, then sets `h2 *= 0x9E3779B9`. All probes for a key fall in one 64-byte block, so with the aligned buffer a lookup touches exactly one cache line.
+- *Probe count.* `k` is chosen to minimize the theoretical false-positive rate: the average over a Poisson(λ = 512 / bits_per_key) number of keys in a block of `(1 − (1 − 1/512)^(k·j))^k`. Blocks that hold more keys than average fill up first, so this optimum is lower than the standard `k`.
+
+**Standard bloom** (for comparison):
+- *Layout.* `bits` is `m / 8` bytes, with `m = max(64, n × bits_per_key)` rounded up to a multiple of 64.
+- *Probes.* `k = round(bits_per_key × ln 2)`. Probe `i` tests bit `((h + i·δ) × m) >> 64` (128-bit multiply), with `δ = rotl(h, 21) | 1` (Kirsch–Mitzenmacher double hashing). A lookup touches up to `k` cache lines.
+
+**Measured at 10 bits/key** (100k keys, 1M absent-key queries; the spec allows ±20% of theory):
+
+| Policy | k | Measured FPR | Theoretical FPR |
+|---|---|---|---|
+| Standard | 7 | 0.823% | 0.819% |
+| Blocked | 6 (from the model) | 0.953% | 0.957% |
+
+### 8.5 Reading tables (`table.{h,cc}`)
+
+- **Open.** `Table::Open` reads and checks the footer (magic, handles), loads the index block, and loads and validates the filter. Both stay in memory for the table's lifetime.
+- **Data blocks.** These are read on demand through `RandomAccessFile`, which uses either `pread` or a read-only `mmap` of the whole file. With `mmap`, block data is used in place with no copy. Experiment 6 compares the two modes.
+- **`InternalGet(lookup_key, fn)`.** This probes the filter first and returns with no I/O if the filter excludes the user key. Otherwise it seeks the index, reads one data block, seeks within it, and calls `fn(key, value)` on the first entry ≥ `lookup_key` while that block is loaded.
+- **Iterator.** `NewIterator()` is a two-level iterator: an index-block iterator selects data blocks, and a block iterator walks each one.
+- **Errors.** The table iterator and the merging iterator both **stop at the first error** (a failed read or a corrupt block) and report it through `status()`. They never skip ahead, because skipping would silently drop entries.
+- **Corruption check.** A test flips a byte at about 350 positions across a table, densely in the footer, in all 18 read-mode × filter × block-size configurations. Every flip either fails `Open` with `Corruption` or is harmless (for example, footer padding). An iterator returns only a correct prefix of the entries, ending at the true end or at a `Corruption` status.
+
+### 8.6 Merging iterator (`merging_iterator.h`)
+
+`MergingIterator<Cmp>` merges `k` child `InternalIterator`s through a binary min-heap of child indexes, at O(log k) per `Next()`.
+- **Ties.** Equal keys come out in child order (lower index first). Internal keys are unique, so a tie only arises from a duplicated input.
+- **Errors.** If any child reports an error, the merge becomes invalid and returns that error.
+- **Interfaces.** Concrete iterators such as `BlockIter` and the skiplist iterator are used directly where their type is known, and satisfy the `ForwardIterator` concept. The virtual `InternalIterator` interface is used only where children differ in type: memtable, L0 files and levels.

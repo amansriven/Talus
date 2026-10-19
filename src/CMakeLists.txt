@@ -5,6 +5,12 @@ add_library(talus
   db/write_batch.cc
   db/write_thread.cc
   memtable/memtable.cc
+  table/block.cc
+  table/block_builder.cc
+  table/filter_policy.cc
+  table/format.cc
+  table/table.cc
+  table/table_builder.cc
   util/arena.cc
   util/coding.cc
   util/crc32c.cc
@@ -21,6 +27,11 @@ target_include_directories(talus
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
 )
 target_link_libraries(talus PUBLIC Threads::Threads PRIVATE talus_warnings)
+
+if(Talus_WITH_LZ4)
+  target_link_libraries(talus PRIVATE talus_lz4)
+  target_compile_definitions(talus PRIVATE TALUS_HAVE_LZ4=1)
+endif()
 
 # The x86 SSE4.2 path uses a function-level target attribute and needs no
 # flags. On Linux ARM64 the CRC extension is optional, so that one file is

@@ -1,6 +1,7 @@
 #include "util/file.h"
 
 #include <fcntl.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -223,6 +224,70 @@ Status SequentialFile::ReadRaw(char* dst, size_t n, size_t* bytes_read) {
     *bytes_read = static_cast<size_t>(r);
     return Status::OK();
   }
+}
+
+Status RandomAccessFile::Open(const std::string& path, Mode mode,
+                              std::unique_ptr<RandomAccessFile>* result) {
+  const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+  if (fd < 0) {
+    return PosixError(path, errno);
+  }
+  FileDescriptor owned(fd);
+  struct stat st{};
+  if (::fstat(fd, &st) != 0) {
+    return PosixError(path, errno);
+  }
+  const auto size = static_cast<uint64_t>(st.st_size);
+  const char* mapping = nullptr;
+  if (mode == Mode::kMmap && size > 0) {
+    void* p = ::mmap(nullptr, size, PROT_READ, MAP_SHARED, fd, 0);
+    if (p == MAP_FAILED) {
+      return PosixError(path, errno);
+    }
+    mapping = static_cast<const char*>(p);
+  }
+  *result = std::make_unique<RandomAccessFile>(PrivateTag{}, std::move(owned), path, size, mapping);
+  return Status::OK();
+}
+
+RandomAccessFile::RandomAccessFile(PrivateTag /*tag*/, FileDescriptor fd, std::string path,
+                                   uint64_t size, const char* mapping)
+    : fd_(std::move(fd)), path_(std::move(path)), size_(size), mapping_(mapping) {}
+
+RandomAccessFile::~RandomAccessFile() {
+  if (mapping_ != nullptr) {
+    ::munmap(const_cast<char*>(mapping_), size_);
+  }
+}
+
+Status RandomAccessFile::Read(uint64_t offset, size_t n, std::string_view* result,
+                              char* scratch) const {
+  if (offset >= size_) {
+    *result = {};
+    return Status::OK();
+  }
+  n = static_cast<size_t>(std::min<uint64_t>(n, size_ - offset));
+  if (mapping_ != nullptr) {
+    *result = std::string_view(mapping_ + offset, n);
+    return Status::OK();
+  }
+  size_t done = 0;
+  while (done < n) {
+    const ssize_t r =
+        ::pread(fd_.get(), scratch + done, n - done, static_cast<off_t>(offset + done));
+    if (r < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      return PosixError(path_, errno);
+    }
+    if (r == 0) {
+      break;  // The file shrank since it was opened.
+    }
+    done += static_cast<size_t>(r);
+  }
+  *result = std::string_view(scratch, done);
+  return Status::OK();
 }
 
 Status SyncDirectory(const std::string& dir) {

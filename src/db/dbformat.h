@@ -67,7 +67,18 @@ concept KeyComparator = requires(const C& cmp, std::string_view a, std::string_v
   { cmp(a, b) } -> std::convertible_to<int>;
 };
 
+// Bytewise helpers for building short index keys.
+// If possible, shortens *start to a string s with *start <= s < limit.
+// REQUIRES: *start < limit.
+void ShortenSeparator(std::string* start, std::string_view limit);
+// If possible, shortens *key to a string s >= *key.
+void ShortenSuccessor(std::string* key);
+
 struct InternalKeyComparator {
+  // Shortest internal keys are 8 bytes (the tag alone). Block readers reject
+  // shorter keys as corruption before comparing them.
+  static constexpr size_t kMinKeySize = kInternalKeyTagSize;
+
   int operator()(std::string_view a, std::string_view b) const {
     int r = ExtractUserKey(a).compare(ExtractUserKey(b));
     if (r == 0) {
@@ -77,9 +88,22 @@ struct InternalKeyComparator {
     }
     return r;
   }
+
+  // Replaces *start with a short internal key k such that *start <= k < limit,
+  // for use as an index separator. REQUIRES: *start < limit.
+  static void FindShortestSeparator(std::string* start, std::string_view limit);
+  // Replaces *key with a short internal key k >= *key.
+  static void FindShortSuccessor(std::string* key);
 };
 
-static_assert(KeyComparator<InternalKeyComparator>);
+// A comparator usable for SSTables: it can also shorten index keys.
+template <typename C>
+concept TableComparator = KeyComparator<C> && requires(std::string* s, std::string_view limit) {
+  C::FindShortestSeparator(s, limit);
+  C::FindShortSuccessor(s);
+};
+
+static_assert(TableComparator<InternalKeyComparator>);
 
 // The internal key used to look up `user_key` as of sequence `seq`. Keys up to
 // kInlineSize bytes are built in an inline buffer, so typical lookups do not
