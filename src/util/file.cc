@@ -74,11 +74,11 @@ Status WritableFile::Create(const std::string& path, std::unique_ptr<WritableFil
   if (fd < 0) {
     return PosixError(path, errno);
   }
-  result->reset(new WritableFile(FileDescriptor(fd), path));  // NOLINT: private constructor.
+  *result = std::make_unique<WritableFile>(PrivateTag{}, FileDescriptor(fd), path);
   return Status::OK();
 }
 
-WritableFile::WritableFile(FileDescriptor fd, std::string path)
+WritableFile::WritableFile(PrivateTag /*tag*/, FileDescriptor fd, std::string path)
     : fd_(std::move(fd)),
       path_(std::move(path)),
       buffer_(std::make_unique_for_overwrite<char[]>(kBufferSize)) {}
@@ -162,12 +162,13 @@ Status SequentialFile::Open(const std::string& path, std::unique_ptr<SequentialF
   if (::fstat(fd, &st) != 0) {
     return PosixError(path, errno);
   }
-  result->reset(  // NOLINT: private constructor.
-      new SequentialFile(std::move(owned), path, static_cast<uint64_t>(st.st_size)));
+  *result = std::make_unique<SequentialFile>(PrivateTag{}, std::move(owned), path,
+                                             static_cast<uint64_t>(st.st_size));
   return Status::OK();
 }
 
-SequentialFile::SequentialFile(FileDescriptor fd, std::string path, uint64_t size)
+SequentialFile::SequentialFile(PrivateTag /*tag*/, FileDescriptor fd, std::string path,
+                               uint64_t size)
     : fd_(std::move(fd)),
       path_(std::move(path)),
       size_(size),

@@ -41,9 +41,14 @@ class FileDescriptor {
 // An append-only file with a fixed-size write buffer that is allocated once,
 // so steady-state appends do not allocate.
 class WritableFile {
+  struct PrivateTag {};
+
  public:
   // Creates `path`, truncating any existing file.
   static Status Create(const std::string& path, std::unique_ptr<WritableFile>* result);
+
+  // Use Create(). (Public only so std::make_unique can call it.)
+  WritableFile(PrivateTag, FileDescriptor fd, std::string path);
 
   // Flushes buffered data (errors ignored; call Close() to observe them).
   ~WritableFile();
@@ -67,7 +72,6 @@ class WritableFile {
  private:
   static constexpr size_t kBufferSize = 64 * 1024;
 
-  WritableFile(FileDescriptor fd, std::string path);
   Status WriteRaw(const char* data, size_t n);
 
   FileDescriptor fd_;
@@ -79,8 +83,13 @@ class WritableFile {
 
 // A buffered sequential reader.
 class SequentialFile {
+  struct PrivateTag {};
+
  public:
   static Status Open(const std::string& path, std::unique_ptr<SequentialFile>* result);
+
+  // Use Open(). (Public only so std::make_unique can call it.)
+  SequentialFile(PrivateTag, FileDescriptor fd, std::string path, uint64_t size);
 
   SequentialFile(const SequentialFile&) = delete;
   SequentialFile& operator=(const SequentialFile&) = delete;
@@ -96,7 +105,6 @@ class SequentialFile {
  private:
   static constexpr size_t kBufferSize = 64 * 1024;
 
-  SequentialFile(FileDescriptor fd, std::string path, uint64_t size);
   Status ReadRaw(char* dst, size_t n, size_t* bytes_read);
 
   FileDescriptor fd_;
