@@ -54,7 +54,8 @@ class GroupCommitter {
   // SetTarget() first. `last_sequence` is the newest sequence number already
   // used (e.g. the maximum found by recovery).
   GroupCommitter(log::Writer* log, MemTable* mem, SequenceNumber last_sequence,
-                 int spin_iterations = WriteThread::kDefaultSpinIterations, Hooks hooks = {});
+                 int spin_iterations = WriteThread::kDefaultSpinIterations, Hooks hooks = {},
+                 size_t max_group_bytes = WriteThread::kMaxGroupBytes);
 
   // Redirects later groups to a new WAL and memtable. Only from PrepareFn:
   // the previous group has finished and the next has not started, so no

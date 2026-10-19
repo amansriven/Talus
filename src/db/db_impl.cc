@@ -262,7 +262,10 @@ Status DBImpl::Recover() {
   hooks.prepare = [this] { return MakeRoomForWrite(); };
   hooks.on_logged = [this](size_t members, size_t bytes) { RecordWriteGroup(members, bytes); };
   committer_ = std::make_unique<GroupCommitter>(log_.get(), mem_.get(), max_sequence,
-                                                options_.write_spin_iterations, std::move(hooks));
+                                                options_.write_spin_iterations, std::move(hooks),
+                                                options_.enable_group_commit
+                                                    ? WriteThread::kMaxGroupBytes
+                                                    : 0);
   InstallSuperVersion();
   DeleteObsoleteFiles(&lock, /*recovering=*/true);
   return Status::OK();
@@ -458,7 +461,22 @@ Status DBImpl::GetImpl(const ReadOptions& options, std::string_view key, std::st
   const SequenceNumber sequence =
       options.snapshot != nullptr ? options.snapshot->sequence() : visible;
   ThreadSlot& slot = per_thread_.Local();
-  SuperVersion* sv = AcquireSuperVersion(&slot);
+  SuperVersion* sv = nullptr;
+  std::unique_ptr<SuperVersion, void (*)(SuperVersion*)> mutex_ref(nullptr,
+                                                                   [](SuperVersion* p) { p->Unref(); });
+  if (options_.use_thread_local_super_version) {
+    sv = AcquireSuperVersion(&slot);
+  } else {
+    // Experiment 3's baseline: take the DB mutex and a reference on every
+    // Get, as LevelDB does, and drop the reference when the Get finishes.
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      sv = super_version_;
+      sv->Ref();
+    }
+    mutex_ref.reset(sv);
+    slot.Add(Counter::kSuperVersionSlowPath);
+  }
   slot.Add(Counter::kGets);
 
   const LookupKey lkey(key, sequence);

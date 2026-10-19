@@ -40,7 +40,7 @@ void WriteThread::EnterAsBatchGroupLeader(Writer* leader, WriteGroup* group) {
   for (Writer* w = leader; w != newest;) {
     Writer* next = w->link_newer;
     const size_t next_bytes = WriteBatchInternal::ByteSize(*next->batch);
-    if (bytes + next_bytes > kMaxGroupBytes) {
+    if (bytes + next_bytes > max_group_bytes_) {
       break;
     }
     bytes += next_bytes;

@@ -103,8 +103,11 @@ class WriteThread {
   // leader's own batch is always included, even if it is larger.
   static constexpr size_t kMaxGroupBytes = size_t{1} << 20;
 
-  explicit WriteThread(int spin_iterations = kDefaultSpinIterations)
-      : spin_iterations_(spin_iterations) {}
+  // max_group_bytes = 0 disables grouping: each leader commits only its own
+  // batch (the "group commit off" baseline of experiment 1).
+  explicit WriteThread(int spin_iterations = kDefaultSpinIterations,
+                       size_t max_group_bytes = kMaxGroupBytes)
+      : spin_iterations_(spin_iterations), max_group_bytes_(max_group_bytes) {}
 
   WriteThread(const WriteThread&) = delete;
   WriteThread& operator=(const WriteThread&) = delete;
@@ -114,7 +117,7 @@ class WriteThread {
   uint8_t JoinBatchGroup(Writer* w);
 
   // Called by a new leader. Builds `group` from the leader and the writers
-  // queued behind it, up to kMaxGroupBytes.
+  // queued behind it, up to max_group_bytes.
   void EnterAsBatchGroupLeader(Writer* leader, WriteGroup* group);
 
   // Wakes every follower in `group` with kParallelMemTableWriter. Each one,
@@ -141,6 +144,7 @@ class WriteThread {
   static void CreateMissingNewerLinks(Writer* head);
 
   const int spin_iterations_;
+  const size_t max_group_bytes_;
   std::atomic<Writer*> newest_writer_{nullptr};
 };
 
