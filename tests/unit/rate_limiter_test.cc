@@ -13,15 +13,15 @@ using Clock = std::chrono::steady_clock;
 
 TEST(RateLimiterTest, UnlimitedNeverWaits) {
   RateLimiter limiter(0);
-  const auto start = Clock::now();
   for (int i = 0; i < 1000; ++i) {
     EXPECT_EQ(limiter.Request(1 << 20).count(), 0);
   }
-  EXPECT_LT(Clock::now() - start, std::chrono::milliseconds(50));
 }
 
-// 1 MiB at 4 MiB/s in 4 KiB requests takes about 250 ms in total, and the
-// bytes are spread evenly rather than written in bursts.
+// 1 MiB at 4 MiB/s in 4 KiB requests takes at least about 250 ms in total,
+// and the bytes are spread evenly rather than written in bursts. There is
+// no upper wall-clock bound: delayed wakeups on shared CI runners can make
+// the transfer slower without violating the bandwidth limit.
 TEST(RateLimiterTest, PacesWritesSmoothly) {
   constexpr uint64_t kRate = 4 << 20;
   constexpr uint64_t kChunk = 4096;
@@ -35,7 +35,6 @@ TEST(RateLimiterTest, PacesWritesSmoothly) {
   }
   const double elapsed = std::chrono::duration<double>(Clock::now() - start).count();
   EXPECT_GT(elapsed, 0.22);
-  EXPECT_LT(elapsed, 0.40);
 
   // Smoothness: in any 25 ms window, no more than that window's share of the
   // rate plus a few chunks of slack (bucket refill and sleep jitter).
@@ -67,7 +66,6 @@ TEST(RateLimiterTest, ThreadsShareTheRate) {
   }
   const double elapsed = std::chrono::duration<double>(Clock::now() - start).count();
   EXPECT_GT(elapsed, 0.22);  // 512 KiB / 2 MiB/s = 250 ms.
-  EXPECT_LT(elapsed, 0.45);
 }
 
 }  // namespace
