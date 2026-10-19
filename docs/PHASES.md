@@ -11,7 +11,7 @@ Each phase ends with every test passing under the `debug`, `asan`, `tsan` and
 | 3. Write path | `WriteBatch`, WAL writer/reader, recovery replay, group commit with adaptive waiting, durable fsync | §5 |
 | 4. SSTable | Block builder/reader, blocked + standard bloom filters, table builder/reader, merging iterator | §6 |
 | 5. Caches | Sharded LRU block cache with pinned handles, table cache, huge-page support | §7 |
-| 6. Versions and compaction | Version/VersionEdit, MANIFEST + CURRENT, SuperVersion with thread-local fast path, memtable switching (immutable memtable, new WAL, writer stall), flush, leveled compaction, rate limiter, write stalls, obsolete-file deletion | §8 |
+| 6. Versions and compaction | Version/VersionEdit, MANIFEST + CURRENT, SuperVersion with thread-local fast path, memtable switching (immutable memtable, new WAL, writer stall), recovery (replay WALs newer than the manifest's log number, then flush to an SSTable), flush, leveled compaction, rate limiter, write stalls, obsolete-file deletion | §8 |
 | 7. DB API | `DB::Open`/`Put`/`Get`/`Write`/iterators/snapshots, `PinnableValue`, `DBStats` with per-thread counters | §2, §9, §10 |
 | 8. Verification | Model-based randomized test with replay, concurrent model test, crash harness, corruption tests, fuzz targets, TSan stress, zero-allocation test | §9, §11 |
 | 9. Benchmarks | Cycle-counter timer, `db_bench`, YCSB, open/closed-loop load, `perf_event_open`, LevelDB/RocksDB adapters, Google Benchmark microbenchmarks, Python sweep scripts | §12 |
