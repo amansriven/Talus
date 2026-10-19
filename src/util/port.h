@@ -19,6 +19,16 @@ inline constexpr size_t kCacheLineSize = 64;
 // the common ARM64 Linux configuration).
 inline constexpr size_t kHugePageSize = size_t{2} << 20;
 
+// A spin-wait hint: PAUSE on x86-64, YIELD on ARM64. It saves power and frees
+// pipeline resources for a sibling hyperthread while a thread polls.
+inline void CpuRelax() {
+#if defined(__x86_64__) || defined(__i386__)
+  __builtin_ia32_pause();
+#elif defined(__aarch64__)
+  asm volatile("yield" ::: "memory");
+#endif
+}
+
 }  // namespace talus
 
 #if defined(__GNUC__) || defined(__clang__)

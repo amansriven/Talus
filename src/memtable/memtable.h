@@ -40,6 +40,8 @@ class MemTable {
 
   Iterator NewIterator() const { return Iterator(&table_); }
 
+  bool concurrent_writes() const { return concurrent_writes_; }
+
   // Bytes of arena memory reserved so far; used to decide when to switch to
   // a new memtable.
   size_t ApproximateMemoryUsage() const { return arena_.MemoryUsage(); }

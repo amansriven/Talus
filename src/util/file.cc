@@ -158,7 +158,7 @@ Status SequentialFile::Open(const std::string& path, std::unique_ptr<SequentialF
     return PosixError(path, errno);
   }
   FileDescriptor owned(fd);
-  struct stat st {};
+  struct stat st{};
   if (::fstat(fd, &st) != 0) {
     return PosixError(path, errno);
   }
@@ -179,7 +179,8 @@ Status SequentialFile::Read(size_t n, char* dst, size_t* bytes_read) {
   while (n > 0) {
     if (buffer_pos_ == buffer_len_) {
       size_t got = 0;
-      Status s = n >= kBufferSize ? ReadRaw(dst, n, &got) : ReadRaw(buffer_.get(), kBufferSize, &got);
+      Status s =
+          n >= kBufferSize ? ReadRaw(dst, n, &got) : ReadRaw(buffer_.get(), kBufferSize, &got);
       if (!s.ok()) {
         *bytes_read = total;
         return s;

@@ -1,12 +1,19 @@
 add_library(talus
   db/dbformat.cc
+  db/group_commit.cc
+  db/log_replay.cc
+  db/write_batch.cc
+  db/write_thread.cc
   memtable/memtable.cc
   util/arena.cc
   util/coding.cc
   util/crc32c.cc
   util/crc32c_arm64.cc
   util/crc32c_x86.cc
+  util/file.cc
   util/status.cc
+  wal/log_reader.cc
+  wal/log_writer.cc
 )
 
 target_include_directories(talus
