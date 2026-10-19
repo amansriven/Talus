@@ -87,3 +87,82 @@ Requests larger than a quarter of a block's capacity get a dedicated block under
 - `memory_usage_` is a relaxed statistic: it is used only to decide when a memtable is full, and an approximate value is acceptable.
 
 Block memory comes from `std::aligned_alloc`, not `operator new`. The spec's zero-allocation test explicitly excludes arena growth, and using the malloc family keeps that growth invisible to the counting `operator new`.
+
+## 5. Internal keys and MVCC (`src/db/dbformat.{h,cc}`)
+
+```
+internal_key = user_key || fixed64(tag)        tag = sequence << 8 | type
+type:  0 = Deletion, 1 = Value                 sequence: 56 bits, 0 .. 2^56 - 1
+```
+
+**Ordering.** Internal keys sort by user key (bytewise, `memcmp` order with
+shorter-prefix-first) ascending, then by `tag` descending. The newest version of
+a user key therefore comes first, and at equal sequence numbers `Value` sorts
+before `Deletion`. A batch never writes two operations with the same sequence,
+so in practice that tie never arises.
+
+**Lookups.** A read at sequence `s` seeks to `user_key || fixed64(s << 8 | 1)`.
+Type 1 is the highest type, so this key sorts immediately before every entry
+for that user key with sequence ≤ `s`. The first entry at or after it is the
+newest visible version, provided its user key matches. `LookupKey` builds this
+key in a 200-byte inline buffer and falls back to the heap only for longer
+user keys, so typical lookups do not allocate.
+
+## 6. Memtable (`src/memtable/`)
+
+### 6.1 Skiplist node layout
+
+Each node is one contiguous arena allocation, 8-byte aligned:
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 4 | `key_size` (uint32, internal key length) |
+| 4 | 4 | `value_size` (uint32) |
+| 8 | `key_size` | internal key |
+| 8 + `key_size` | `value_size` | value |
+| 8 + round_up(`key_size` + `value_size`, 8) | 8 × height | `std::atomic<Node*> next[height]` |
+
+- **Height.** Heights are in [1, 12]. Each extra level is kept with probability 1/4: two random bits per level, taken from the high 32 bits of one draw from a thread-local xorshift64* generator. Each thread seeds its generator once, from a global counter passed through SplitMix64.
+- **Head node.** The head is a node with an empty key and value and the full 12 levels.
+- **Writing entries.** Writers encode the internal key and value directly into node memory through a fill callback, so an insert makes no allocation other than the arena's.
+- **Layout trade-off.** Because the spec puts the links after the value, a search touches a node's header and key, and also its `next[level]`, which is on a different cache line when key and value exceed about 50 bytes. Prefetching (§6.3) is meant to hide this second miss. Experiment 7 measures the effect.
+
+### 6.2 Concurrency
+
+There are two insert modes:
+- **`Insert`, single writer.** Callers serialize inserts. The new node's links are set with relaxed stores, then each predecessor is updated with a release store, from level 0 upward.
+- **`InsertConcurrently`, lock-free with many writers.** At each level from 0 upward:
+  1. Set `new.next[L] = next` (relaxed).
+  2. CAS `prev.next[L]` from `next` to `new`: release on success, relaxed on failure.
+  3. On failure, recompute the splice for level `L`, starting from `prev`, and retry.
+
+Both modes first raise `max_height_` (relaxed store or CAS loop). Readers never lock.
+
+The invariants that make this safe, and the reason for each memory order:
+
+1. **Sublist property.** Every level's list is sorted strictly ascending, and every node in level L+1 is in level L. Bottom-up linking ensures this: a node's level-L CAS succeeds before its level-(L+1) link is attempted. A reader or writer that reaches a node at level L+1 can therefore descend from it to level L.
+2. **Safe publication.** A node is reachable at level L only through a release store or CAS of a level-L link. Before that point, its header, key, value and `next[L]` are all written. Every link load that is followed by a dereference uses acquire, so a thread that reaches a node sees it fully initialized. This holds transitively when one writer links its node in front of another writer's node, because that writer read the other node through an acquire load.
+3. **CAS retry is sound.** Nodes are never removed, so a failed CAS at level L leaves `prev.key < key` true. Restarting the splice from `prev` is therefore valid. A CAS fails only when another thread's CAS on the same link succeeded, so some thread always makes progress (lock-freedom).
+4. **`max_height_` is relaxed.** A reader that sees a raised height before the head's new links are set reads null at those levels and descends. A reader that sees a stale height starts lower, which is still correct by (1).
+5. **Prefetch reads are relaxed.** The prefetch hint reads `n.next[L]` relaxed and passes it to `__builtin_prefetch`, which never dereferences it.
+6. **Memory reclamation.** None is needed while the skiplist exists. Nodes live in the memtable's arena (§4.1), which is freed only when the memtable is destroyed, after its last reader is gone (reference counting arrives with the SuperVersion in phase 6).
+7. **Unique keys.** Keys must be unique. The memtable guarantees this because every entry carries a distinct sequence number.
+
+**Verification.** `SkipListConcurrentTest` has readers scan while writers insert. Each writer publishes its progress with a release store; each reader acquires those progress values before scanning and checks three things:
+- the scan is strictly ascending;
+- each writer's keys appear without gaps;
+- every key published before the scan is present.
+
+As a check of the check, changing the two publishing operations from `release` to `relaxed` makes TSan report data races in these tests.
+
+### 6.3 Prefetching
+
+`SkipList` takes a template parameter, `kPrefetch`, which is on by default. While a search compares the key of candidate node `n`, it issues `__builtin_prefetch(n.next[L], /*read*/ 0, /*low locality*/ 1)`, so the node after `n` is already loading if the search advances. The template parameter removes the hint at compile time, giving the off case of experiment 7 with no runtime branch.
+
+### 6.4 MemTable
+
+`MemTable` stores internal keys with their values (empty for deletions) in a
+`SkipList<InternalKeyComparator>` backed by its own `Arena`.
+- `Add` uses `Insert` or `InsertConcurrently`, depending on `concurrent_writes`, which comes from the `allow_concurrent_memtable_write` option.
+- `Get` seeks to the lookup key and checks the user key. It returns the value as a `std::string_view` into arena memory, which is the basis of the zero-copy `PinnableValue` path, or `NotFound` for a deletion.
+- `ApproximateMemoryUsage` reports the arena's reserved bytes. It decides when to switch memtables (phase 6).

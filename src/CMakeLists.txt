@@ -1,4 +1,6 @@
 add_library(talus
+  db/dbformat.cc
+  memtable/memtable.cc
   util/arena.cc
   util/coding.cc
   util/crc32c.cc
