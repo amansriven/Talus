@@ -1,7 +1,6 @@
 // db_bench: LevelDB-style microbenchmarks over a key-value engine (spec §12).
 //
-//   db_bench --benchmarks=fillseq,readrandom --num=1000000 --threads=4 \
-//            --engine=talus --repetitions=3 --output=result.json
+//   db_bench --benchmarks=fillseq,readrandom --num=1000000 --threads=4 --engine=talus --repetitions=3 --output=result.json
 //
 // Workloads:
 //   fillseq          write keys 0..num-1 in order (fresh DB)

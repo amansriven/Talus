@@ -1,8 +1,7 @@
 // YCSB core workloads A-F (spec §12), with the same load modes and JSON
 // output as db_bench.
 //
-//   ycsb --workload=a --records=1000000 --operations=1000000 \
-//        --distribution=zipfian --threads=8 --engine=talus --output=a.json
+//   ycsb --workload=a --records=1000000 --operations=1000000 --distribution=zipfian --threads=8 --engine=talus --output=a.json
 //
 //   A  50% read, 50% update            (update heavy)
 //   B  95% read,  5% update            (read mostly)

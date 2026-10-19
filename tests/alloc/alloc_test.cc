@@ -1,5 +1,6 @@
 // Allocation test (spec §9). This binary replaces the global operator
-// new/delete with counting versions, then asserts that each hot path makes
+// new/delete with counting versions (linker wrappers under Linux TSan),
+// then asserts that each hot path makes
 // zero heap allocations across 100K operations after a warm-up:
 //  * Put and Write (memtable arena growth and WAL file growth are excluded
 //    by construction: no memtable switch happens during the measured loop,
@@ -27,6 +28,7 @@ namespace {
 
 thread_local long t_allocations = 0;
 
+#if !defined(TALUS_ALLOC_WRAP_NEW)
 void* CountedAlloc(std::size_t n, std::size_t align) {
   ++t_allocations;
   void* p = nullptr;
@@ -40,9 +42,30 @@ void* CountedAlloc(std::size_t n, std::size_t align) {
   }
   return p;
 }
+#endif
 
 }  // namespace
 
+#if defined(TALUS_ALLOC_WRAP_NEW)
+// Linux TSan owns strong new/delete definitions. --wrap redirects calls from
+// the test and engine to these counters, then __real_ forwards to TSan's
+// allocation entry points. Do not replace/delete or bypass its allocator.
+// Aligned arena backing allocations remain excluded, as in the regular test.
+#define TALUS_WRAP_NEW(symbol, params, args) \
+  extern "C" void* __real_##symbol params;   \
+  extern "C" void* __wrap_##symbol params {  \
+    ++t_allocations;                         \
+    return __real_##symbol args;             \
+  }
+
+TALUS_WRAP_NEW(_Znwm, (std::size_t n), (n))
+TALUS_WRAP_NEW(_Znam, (std::size_t n), (n))
+TALUS_WRAP_NEW(_ZnwmSt11align_val_t, (std::size_t n, std::align_val_t a), (n, a))
+TALUS_WRAP_NEW(_ZnamSt11align_val_t, (std::size_t n, std::align_val_t a), (n, a))
+TALUS_WRAP_NEW(_ZnwmRKSt9nothrow_t, (std::size_t n, const std::nothrow_t& t), (n, t))
+TALUS_WRAP_NEW(_ZnamRKSt9nothrow_t, (std::size_t n, const std::nothrow_t& t), (n, t))
+#undef TALUS_WRAP_NEW
+#else
 // NOLINTBEGIN: replacing the global allocation functions is the point here.
 void* operator new(std::size_t n) { return CountedAlloc(n, 0); }
 void* operator new[](std::size_t n) { return CountedAlloc(n, 0); }
@@ -69,6 +92,7 @@ void operator delete[](void* p, std::align_val_t) noexcept { std::free(p); }
 void operator delete(void* p, std::size_t, std::align_val_t) noexcept { std::free(p); }
 void operator delete[](void* p, std::size_t, std::align_val_t) noexcept { std::free(p); }
 // NOLINTEND
+#endif
 
 namespace talus {
 namespace {
@@ -87,6 +111,34 @@ long AllocationsDuring(Fn&& fn) {
   const long before = t_allocations;
   fn();
   return t_allocations - before;
+}
+
+// A broken/intercepted-away counter could otherwise make every zero-allocation
+// assertion pass vacuously. Volatile function pointers prevent allocation
+// elision and exercise each allocation entry point we count.
+TEST(AllocationCounterTest, CountsEveryNewOverload) {
+  void* (*volatile scalar)(std::size_t) = &::operator new;
+  void* (*volatile array)(std::size_t) = &::operator new[];
+  void* (*volatile aligned)(std::size_t, std::align_val_t) = &::operator new;
+  void* (*volatile aligned_array)(std::size_t, std::align_val_t) = &::operator new[];
+  void* (*volatile nothrow)(std::size_t, const std::nothrow_t&) noexcept = &::operator new;
+  void* (*volatile nothrow_array)(std::size_t, const std::nothrow_t&) noexcept = &::operator new[];
+  constexpr auto alignment = std::align_val_t{64};
+  const long before = t_allocations;
+  void* p1 = scalar(128);
+  void* p2 = array(128);
+  void* p3 = aligned(128, alignment);
+  void* p4 = aligned_array(128, alignment);
+  void* p5 = nothrow(128, std::nothrow);
+  void* p6 = nothrow_array(128, std::nothrow);
+  const long counted = t_allocations - before;
+  ::operator delete(p1);
+  ::operator delete[](p2);
+  ::operator delete(p3, alignment);
+  ::operator delete[](p4, alignment);
+  ::operator delete(p5);
+  ::operator delete[](p6);
+  EXPECT_EQ(counted, 6);
 }
 
 class AllocTest : public ::testing::Test {

@@ -76,3 +76,17 @@ The user authorized a $5 cumulative cloud-spending cap; see
 attempts were rejected for capacity. No VM or disk was created, and Linux
 validation remains pending. Prepared source/bootstrap/validation files are
 retained locally for a later attempt.
+
+## TSan CI allocation-link fix
+
+Linux Clang 18 TSan defines strong new/delete symbols, which conflicted with
+the allocation test's replacements. Linux TSan now counts calls through
+linker wrappers and forwards to the sanitizer allocator. A positive counter
+self-test verifies all six instrumented allocation overloads; zero-allocation
+assertions remain enabled. On a disposable Ubuntu 24.04 x86-64 VM, the target
+linked and all six allocation tests passed under TSan. Release and ASan/UBSan
+allocation suites also passed locally. This is a targeted test result, not a
+claim that the full Linux suite or PMU acceptance has passed.
+
+The temporary TSan VM, boot disk and validation SSH metadata have been removed.
+Final instance, disk and reserved-address inventories are empty.

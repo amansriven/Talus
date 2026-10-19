@@ -37,3 +37,22 @@ https://cloud.google.com/products/compute/pricing/general-purpose
 
 Runtime-limit reference:
 https://docs.cloud.google.com/compute/docs/instances/limit-vm-runtime
+
+## Linux TSan allocation-test check
+
+A separate e2-standard-4 VM (`talus-tsan-check`, us-central1-a) was used to
+reproduce the Ubuntu 24.04 / Clang 18 allocation-test linker failure and verify
+the fix. It had a 900-second automatic-delete limit and an auto-deleted 20 GB
+boot disk. The listed compute price is $0.13402284/hour (about $0.034 at the
+maximum lifetime); reserve **$0.10** of the cumulative $5 budget for this run
+and associated charges until actual billing is available. This reservation
+leaves $4.90 uncommitted; do not reset the budget for later runs.
+
+The TSan allocation target linked and all six tests passed with no TSan
+reports. Release and ASan/UBSan allocation suites also passed locally. This
+small VM has no required PMU support and establishes no hardware-counter
+performance claims. Logs are in `build/tsan-link-validation/`.
+
+Cleanup verified: the VM and boot disk were deleted, project inventory lists
+no instances/disks/reserved addresses, and validation SSH metadata was removed.
+The final inventory is retained with the run logs.

@@ -65,6 +65,17 @@ talus_gtest(talus_concurrent_model_test model/concurrent_model_test.cc)
 talus_gtest(talus_corruption_test corruption/corruption_test.cc)
 talus_gtest(talus_stress_test stress/stress_test.cc)
 talus_gtest(talus_alloc_test alloc/alloc_test.cc)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND "thread" IN_LIST Talus_SANITIZE)
+  # Clang's Linux TSan runtime defines strong global new/delete symbols.
+  # Count calls at link time while preserving the runtime's allocator and
+  # keeping all allocation assertions active. These are the 64-bit Itanium
+  # ABI symbols for scalar/array, aligned and nothrow allocation overloads.
+  target_compile_definitions(talus_alloc_test PRIVATE TALUS_ALLOC_WRAP_NEW=1)
+  foreach(symbol _Znwm _Znam _ZnwmSt11align_val_t _ZnamSt11align_val_t
+                 _ZnwmRKSt9nothrow_t _ZnamRKSt9nothrow_t)
+    target_link_options(talus_alloc_test PRIVATE "LINKER:--wrap=${symbol}")
+  endforeach()
+endif()
 
 # Crash harness: 100 SIGKILL iterations by default (the long run is
 # `talus_crash_test --iterations 10000`).

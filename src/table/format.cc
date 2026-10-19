@@ -59,6 +59,7 @@ bool CompressionSupported(CompressionType type) {
 // LZ4 block payload: varint32 uncompressed_size | LZ4 block-format data.
 void CompressBlock(CompressionType type, std::string_view raw, std::string* out) {
   assert(type == CompressionType::kLZ4 && CompressionSupported(type));
+  (void)type;  // The precondition above is compiled out in release builds.
   out->clear();
 #if defined(TALUS_HAVE_LZ4)
   PutVarint32(out, static_cast<uint32_t>(raw.size()));
@@ -69,7 +70,6 @@ void CompressBlock(CompressionType type, std::string_view raw, std::string* out)
       LZ4_compress_default(raw.data(), out->data() + header, static_cast<int>(raw.size()), bound);
   out->resize(header + static_cast<size_t>(n));
 #else
-  (void)type;
   (void)raw;
 #endif
 }
