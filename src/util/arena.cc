@@ -16,9 +16,9 @@ namespace talus {
 // allocating thread writes, and keeping it off the first data line means
 // threads initializing freshly allocated nodes do not invalidate it.
 struct alignas(kCacheLineSize) Arena::Block {
-  Block* next = nullptr;     // Guarded by Arena::mu_.
-  size_t capacity = 0;       // Usable bytes in data(); immutable once published.
-  size_t total_bytes = 0;    // Bytes obtained from the system, header included.
+  Block* next = nullptr;   // Guarded by Arena::mu_.
+  size_t capacity = 0;     // Usable bytes in data(); immutable once published.
+  size_t total_bytes = 0;  // Bytes obtained from the system, header included.
   std::atomic<size_t> used{0};
 
   char* data() { return reinterpret_cast<char*>(this) + sizeof(Block); }
@@ -31,8 +31,9 @@ constexpr size_t RoundUp(size_t n, size_t align) { return (n + align - 1) & ~(al
 }  // namespace
 
 Arena::Arena(size_t block_size, bool use_huge_pages)
-    : block_size_(use_huge_pages ? kHugePageSize
-                                 : RoundUp(std::max(block_size, 4 * sizeof(Block)), kCacheLineSize)),
+    : block_size_(use_huge_pages
+                      ? kHugePageSize
+                      : RoundUp(std::max(block_size, 4 * sizeof(Block)), kCacheLineSize)),
       use_huge_pages_(use_huge_pages) {
   std::lock_guard<std::mutex> lock(mu_);
   Block* first = NewBlockLocked(block_size_ - sizeof(Block), use_huge_pages_);

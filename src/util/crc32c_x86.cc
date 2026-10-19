@@ -14,8 +14,7 @@
 namespace talus::crc32c::internal {
 namespace {
 
-__attribute__((target("sse4.2"))) uint32_t ExtendSse42(uint32_t crc, const char* data,
-                                                       size_t n) {
+__attribute__((target("sse4.2"))) uint32_t ExtendSse42(uint32_t crc, const char* data, size_t n) {
   const auto* p = reinterpret_cast<const uint8_t*>(data);
   uint64_t c = crc ^ 0xffffffffu;
 

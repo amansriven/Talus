@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  linux:
+    name: ubuntu / ${{ matrix.preset }} (${{ matrix.cc }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { preset: debug, cc: gcc, cxx: g++ }
+          - { preset: asan, cc: clang, cxx: clang++ }
+          - { preset: tsan, cc: clang, cxx: clang++ }
+    env:
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Allow TSan's shadow memory layout
+        if: matrix.preset == 'tsan'
+        # Newer kernels randomize mmap addresses with more entropy than TSan's
+        # fixed shadow mapping tolerates.
+        run: sudo sysctl vm.mmap_rnd_bits=28
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }}
+      - name: Build
+        run: cmake --build --preset ${{ matrix.preset }}
+      - name: Test
+        run: ctest --preset ${{ matrix.preset }}
+
+  macos:
+    name: macos / release
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: brew install ninja
+      - name: Configure
+        run: cmake --preset release
+      - name: Build
+        run: cmake --build --preset release
+      - name: Test
+        run: ctest --preset release

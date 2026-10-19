@@ -2,9 +2,7 @@
 
 namespace talus {
 
-char* EncodeVarint32(char* dst, uint32_t value) {
-  return EncodeVarint64(dst, value);
-}
+char* EncodeVarint32(char* dst, uint32_t value) { return EncodeVarint64(dst, value); }
 
 char* EncodeVarint64(char* dst, uint64_t value) {
   auto* ptr = reinterpret_cast<uint8_t*>(dst);
