@@ -71,3 +71,53 @@ jobs:
           for t in block_reader sstable_reader wal_reader version_edit; do
             ./fuzz/fuzz_$t -max_total_time=60 -close_fd_mask=3 corpus/$t
           done
+
+  benchmarks:
+    name: benchmarks / ${{ matrix.os }} (all engines)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    env:
+      MPLCONFIGDIR: ${{ runner.temp }}/matplotlib
+      XDG_CACHE_HOME: ${{ runner.temp }}/cache
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install tools (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Install tools (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ninja
+      - name: Install plotting dependency
+        run: python3 -m pip install 'matplotlib>=3.8,<4'
+      - name: Configure comparison engines
+        run: cmake -S . -B build/compare -G Ninja -DCMAKE_BUILD_TYPE=Release -DTalus_BENCH_COMPARE=ON
+      - name: Build benchmark tools and regression tests
+        run: cmake --build build/compare --parallel 3 --target db_bench ycsb micro_bench talus_bench_timer_test talus_bench_harness_test
+      - name: Harness and adapter regression tests
+        run: |
+          ./build/compare/bench/talus_bench_timer_test
+          ./build/compare/bench/talus_bench_harness_test
+      - name: All engines, distributions, workloads and load modes
+        run: python3 bench/scripts/smoke.py --build build/compare --engines talus,leveldb,rocksdb --micro --out build/validation/smoke
+      - name: Restricted Linux CPU affinity
+        if: runner.os == 'Linux'
+        run: |
+          CPU=$(python3 -c 'import os; print(max(os.sched_getaffinity(0)))')
+          taskset -c "$CPU" python3 bench/scripts/smoke.py --build build/compare --engines talus --require-affinity --out build/validation/restricted-cpu
+      - name: Sweep and plot smoke check
+        run: python3 bench/scripts/sweep.py --build build/compare --engines talus,leveldb,rocksdb --threads 1,2 --benchmarks readrandom,readwhilewriting --num 2000 --repetitions 2 --warmup-ops 10 --rate 10000 --out build/validation/sweep
+      - name: All experiment scripts (smoke sizes only)
+        run: python3 bench/scripts/experiments.py --build build/compare --quick --max-threads 2 --out build/validation/experiments
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-validation-${{ matrix.os }}
+          path: |
+            build/validation/
+            build/compare/Testing/Temporary/LastTest.log

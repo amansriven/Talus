@@ -23,6 +23,7 @@ enum PerfEvent : int {
 };
 
 struct PerfTotals {
+  bool collected = false;
   std::array<uint64_t, kNumPerfEvents> values{};
   std::array<bool, kNumPerfEvents> available{};
 

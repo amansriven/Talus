@@ -34,6 +34,8 @@ def main() -> None:
     ap.add_argument("--repetitions", type=int, default=3)
     ap.add_argument("--warmup-ops", type=int, default=10_000)
     ap.add_argument("--value-size", type=int, default=100)
+    ap.add_argument("--rate", type=float, default=0, help="total arrival rate; 0 = closed loop")
+    ap.add_argument("--duration", type=float, default=0, help="seconds cap per workload")
     ap.add_argument("--cpus", default=None, help="taskset CPU list for the whole process (Linux)")
     ap.add_argument("--db", default="/tmp/talus_sweep_db")
     args = ap.parse_args()
@@ -52,7 +54,7 @@ def main() -> None:
             print(f"== {engine}, {t} threads", flush=True)
             data = tb.run_db_bench(
                 args.build, args.out / "raw" / f"{engine}_t{t}.json", cpus=args.cpus,
-                engine=engine, threads=t, benchmarks=run_list, num=args.num,
+                rate=args.rate, duration=args.duration, engine=engine, threads=t, benchmarks=run_list, num=args.num,
                 value_size=args.value_size, repetitions=args.repetitions,
                 warmup_ops=args.warmup_ops, pin_cpus=True, db=f"{args.db}_{engine}")
             for entry in data["results"]:

@@ -95,13 +95,16 @@ def _run_tool(binary: Path, flags: dict, out_json: Path, cpus: str | None) -> di
     args = [str(binary)] + [f"--{k}={_flag_value(v)}" for k, v in flags.items()] + [f"--output={out_json}"]
     cmd = _pin_prefix(cpus) + args
     print("  $", " ".join(cmd), flush=True)
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
     if proc.returncode != 0:
         raise RuntimeError(f"{binary.name} failed ({proc.returncode}):\n{proc.stderr[-3000:]}")
     for line in proc.stderr.splitlines():
         if " ops/s" in line:
             print("    " + line, flush=True)
-    return json.loads(out_json.read_text())
+    data = json.loads(out_json.read_text())
+    from smoke import validate
+    validate(data)
+    return data
 
 
 def _flag_value(v) -> str:
@@ -121,18 +124,19 @@ def run_ycsb(build: Path, out_json: Path, cpus: str | None = None, **flags) -> d
 
 
 def run_micro(build: Path, out_json: Path, benchmark_filter: str, repetitions: int = 1,
-              cpus: str | None = None) -> dict:
+              cpus: str | None = None, min_time: str = "0.5s") -> dict:
     out_json.parent.mkdir(parents=True, exist_ok=True)
     cmd = _pin_prefix(cpus) + [
         str(build / "bench" / "micro_bench"),
         f"--benchmark_filter={benchmark_filter}",
         f"--benchmark_repetitions={repetitions}",
+        f"--benchmark_min_time={min_time}",
         "--benchmark_format=json",
         f"--benchmark_out={out_json}",
         "--benchmark_out_format=json",
     ]
     print("  $", " ".join(cmd), flush=True)
-    subprocess.run(cmd, check=True, capture_output=True, text=True)
+    subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=3600)
     return json.loads(out_json.read_text())
 
 

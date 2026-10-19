@@ -23,6 +23,7 @@
 // --repetitions, --pin_cpus, --rate, --duration (seconds cap), --db,
 // --output, plus the engine settings in bench_common.cc.
 
+#include <algorithm>
 #include <cstdio>
 #include <memory>
 #include <sstream>
@@ -64,10 +65,12 @@ class Bench {
         Reopen(ec);
       }
       RunResult r = RunOnce(name);
+      had_errors_ = had_errors_ || r.errors != 0;
       engine_->WaitForCompactions();  // Each repetition starts from a settled DB.
-      reps_json += (rep > 0 ? "," : "") + r.ToJson().insert(1, "\"engine_stats\":" +
-                                                                  engine_->StatsJson() + ",");
-      std::fprintf(stderr, "%-16s rep %d: %10.0f ops/s  p50 %6.2f us  p99 %7.2f us  p99.9 %8.2f us\n",
+      reps_json += (rep > 0 ? "," : "") +
+                   r.ToJson().insert(1, "\"engine_stats\":" + engine_->StatsJson() + ",");
+      std::fprintf(stderr,
+                   "%-16s rep %d: %10.0f ops/s  p50 %6.2f us  p99 %7.2f us  p99.9 %8.2f us\n",
                    name.c_str(), rep + 1, r.OpsPerSec(), r.latency.Percentile(50) / 1e3,
                    r.latency.Percentile(99) / 1e3, r.latency.Percentile(99.9) / 1e3);
       runs.push_back(std::move(r));
@@ -77,6 +80,7 @@ class Bench {
   }
 
   void Close() { engine_.reset(); }
+  bool had_errors() const { return had_errors_; }
 
  private:
   void Reopen(const EngineConfig& ec) {
@@ -97,6 +101,7 @@ class Bench {
     const bool is_read = name.rfind("read", 0) == 0 || name == "seekrandom";
     const uint64_t total_ops = is_read && c_.reads > 0 ? c_.reads : c_.num;
     spec.ops_per_thread = total_ops / static_cast<uint64_t>(c_.threads);
+    spec.extra_ops = total_ops % static_cast<uint64_t>(c_.threads);
     spec.target_rate = c_.rate;
     spec.max_seconds = c_.duration;
     spec.warmup_ops_per_thread = c_.warmup_ops;
@@ -112,7 +117,8 @@ class Bench {
     if (name == "fillseq") {
       return RunWorkload(spec, [=, this](int t, uint64_t i, std::mt19937_64& rng) {
         thread_local std::string key;
-        key = Key(static_cast<uint64_t>(t) * per_thread + i);
+        key = Key(static_cast<uint64_t>(t) * per_thread +
+                  std::min(static_cast<uint64_t>(t), spec.extra_ops) + i);
         return e->Put(key, values_.Next(rng));
       });
     }
@@ -124,21 +130,27 @@ class Bench {
       });
     }
     if (name == "readrandom" || name == "readwhilewriting") {
+      std::atomic<uint64_t> background_errors{0};
       if (name == "readwhilewriting") {
-        spec.background = [=, this](const std::atomic<bool>& stop) {
+        spec.background = [=, this, &background_errors](const std::atomic<bool>& stop) {
           std::mt19937_64 rng(42);
           std::string key;
           while (!stop.load(std::memory_order_acquire)) {  // Pairs with the runner's release.
             key = Key(rng() % num);
-            (void)e->Put(key, values_.Next(rng));
+            if (!e->Put(key, values_.Next(rng))) {
+              // Relaxed: the worker join orders the final read.
+              background_errors.fetch_add(1, std::memory_order_relaxed);
+            }
           }
         };
       }
-      return RunWorkload(spec, [=, this](int, uint64_t, std::mt19937_64& rng) {
+      RunResult r = RunWorkload(spec, [=, this](int, uint64_t, std::mt19937_64& rng) {
         thread_local std::string key;
         key = Key(rng() % num);
         return e->Get(key) >= 0;  // A miss is not an error.
       });
+      r.errors += background_errors.load(std::memory_order_relaxed);  // Ordered by join.
+      return r;
     }
     if (name == "readmissing") {
       return RunWorkload(spec, [=, this](int, uint64_t, std::mt19937_64& rng) {
@@ -163,11 +175,10 @@ class Bench {
           volatile size_t sink = iter->value().size();
           (void)sink;
         }
-        return true;
+        return iter->ok();
       });
     }
     if (name == "readseq") {
-      spec.target_rate = 0;  // A scan is inherently closed loop.
       std::vector<std::unique_ptr<EngineIterator>> iters(static_cast<size_t>(c_.threads));
       for (auto& it : iters) {
         it = e->NewIterator();
@@ -178,10 +189,13 @@ class Bench {
         if (!it->Valid()) {
           it->SeekToFirst();  // Wrap around if the DB holds fewer entries than ops.
         }
+        if (!it->Valid()) {
+          return false;
+        }
         volatile size_t sink = it->key().size() + it->value().size();
         (void)sink;
         it->Next();
-        return true;
+        return it->ok();
       });
       return r;
     }
@@ -189,6 +203,7 @@ class Bench {
     std::exit(2);
   }
 
+  bool had_errors_ = false;
   const Config c_;
   const EngineConfig ec_;
   const ValueSource values_;
@@ -214,10 +229,17 @@ int Main(int argc, char** argv) {
   EngineConfig ec = EngineConfigFromFlags(flags);
   flags.CheckAllUsed();
 
-  std::fprintf(stderr, "db_bench: engine=%s num=%llu threads=%d key=%dB value=%zuB %s\n",
-               c.engine.c_str(), static_cast<unsigned long long>(c.num), c.threads, c.key_size,
-               c.value_size, c.rate > 0 ? ("open loop @ " + std::to_string(c.rate) + " ops/s").c_str()
-                                        : "closed loop");
+  std::fprintf(
+      stderr, "db_bench: engine=%s num=%llu threads=%d key=%dB value=%zuB %s\n", c.engine.c_str(),
+      static_cast<unsigned long long>(c.num), c.threads, c.key_size, c.value_size,
+      c.rate > 0 ? ("open loop @ " + std::to_string(c.rate) + " ops/s").c_str() : "closed loop");
+  if (c.threads <= 0 || c.num == 0 || c.num > INT64_MAX || c.reads > INT64_MAX ||
+      c.num < static_cast<uint64_t>(c.threads) || c.key_size <= 0 || c.value_size > (1ULL << 30) ||
+      c.repetitions <= 0 || c.rate < 0 || c.duration < 0 || c.warmup_ops > INT64_MAX ||
+      benchmarks.empty()) {
+    std::fprintf(stderr, "invalid benchmark counts, sizes, rate or duration\n");
+    return 2;
+  }
   Bench bench(c, ec);
   std::string results;
   std::stringstream list(benchmarks);
@@ -230,8 +252,9 @@ int Main(int argc, char** argv) {
   WriteJson(output, "{\"tool\":\"db_bench\",\"engine\":" + JsonString(c.engine) +
                         ",\"load\":" + (c.rate > 0 ? "\"open\"" : "\"closed\"") +
                         ",\"flags\":" + flags.ToJson() + ",\"engine_config\":" + ec.ToJson() +
-                        ",\"environment\":" + EnvironmentJson() + ",\"results\":[" + results + "]}");
-  return 0;
+                        ",\"environment\":" + EnvironmentJson() + ",\"results\":[" + results +
+                        "]}");
+  return bench.had_errors() ? 1 : 0;
 }
 
 }  // namespace

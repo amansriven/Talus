@@ -77,10 +77,11 @@ class Histogram {
 struct RunSpec {
   int threads = 1;
   uint64_t ops_per_thread = 0;
-  double target_rate = 0;    // Total ops/s across threads; 0 = closed loop.
-  double max_seconds = 0;    // Stop early after this long (0 = no limit).
+  uint64_t extra_ops = 0;  // One additional operation on each of the first N threads.
+  double target_rate = 0;  // Total ops/s across threads; 0 = closed loop.
+  double max_seconds = 0;  // Stop early after this long (0 = no limit).
   uint64_t warmup_ops_per_thread = 0;
-  bool pin_cpus = false;     // Pin worker t to CPU t (Linux).
+  bool pin_cpus = false;      // Pin worker t to CPU t (Linux).
   uint64_t bytes_per_op = 0;  // For MB/s.
   // Optional unmeasured thread (e.g. the writer in readwhilewriting); it
   // must return once `stop` becomes true.
@@ -106,11 +107,14 @@ struct RunResult {
   Histogram latency;
   std::vector<SecondStats> per_second;
   PerfTotals perf;
+  std::string initial_stats = "{}";       // After warmup, before measured operations.
   std::vector<std::string> stats_series;  // JSON, one per second.
 
   double OpsPerSec() const { return seconds > 0 ? static_cast<double>(ops) / seconds : 0; }
   std::string ToJson() const;
 };
+
+std::vector<int> BenchmarkCpus();
 
 RunResult RunWorkload(const RunSpec& spec, const OpFn& op);
 

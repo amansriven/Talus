@@ -16,3 +16,12 @@ Each phase ends with every test passing under the `debug`, `asan`, `tsan` and
 | 8. Verification | Model-based randomized test with replay, concurrent model test, crash harness, corruption tests, fuzz targets, TSan stress, zero-allocation test | §9, §11 |
 | 9. Benchmarks | Cycle-counter timer, `db_bench`, YCSB, open/closed-loop load, `perf_event_open`, LevelDB/RocksDB adapters, Google Benchmark microbenchmarks, Python sweep scripts | §12 |
 | 10. Experiments and docs | The seven A/B experiments, `PERFORMANCE.md`, complete `DESIGN.md`, README with results | §12, §13, §14 |
+
+## Phase 9 acceptance status
+
+Implementation and macOS ARM64 validation are complete: all-engine workload
+matrix, microbenchmarks, sweeps/plots, seven quick experiment scripts and
+benchmark regression tests pass. Linux x86-64 affinity/PMU acceptance is still
+pending. The CI job and strict host validator are ready; see
+[BENCHMARKS.md](BENCHMARKS.md) and [STATUS.md](STATUS.md). Full experiment
+measurements remain Phase 10.

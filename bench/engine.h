@@ -56,6 +56,7 @@ class EngineIterator {
   virtual void Seek(std::string_view target) = 0;
   virtual void SeekToFirst() = 0;
   virtual bool Valid() const = 0;
+  virtual bool ok() const = 0;
   virtual void Next() = 0;
   virtual std::string_view key() const = 0;
   virtual std::string_view value() const = 0;
@@ -75,7 +76,8 @@ class Engine {
   // Like Get, but copies the value out (YCSB read-modify-write).
   virtual int GetCopy(std::string_view key, std::string* value) = 0;
   virtual std::unique_ptr<EngineIterator> NewIterator() = 0;
-  // Waits until flushes and compactions have caught up.
+  // Best-effort wait for background work. LevelDB exposes only an L0-file
+  // heuristic; see docs/BENCHMARKS.md for comparison limitations.
   virtual void WaitForCompactions() = 0;
   // Engine statistics as a JSON value (an object for Talus, the engine's
   // stats text for others).

@@ -17,8 +17,7 @@ It has two goals, and they're equally important:
 > 🚧 **Status:** Phases 0–8 of 10 are done ([roadmap](docs/PHASES.md)). The engine works end to end:
 > crash-safe writes with group commit, a lock-free read path, SSTables with cache-line-blocked bloom
 > filters, leveled compaction, snapshots, iterators and zero-copy reads. It's verified by a
-> 1M-operation model test, a SIGKILL crash harness, corruption sweeps and fuzzing. Next up:
-> benchmarks against LevelDB and RocksDB.
+> 1M-operation model test, a SIGKILL crash harness, corruption sweeps and fuzzing. Phase 9 tools pass local checks across Talus, LevelDB and RocksDB; Linux hardware-counter acceptance remains.
 
 ---
 
@@ -90,11 +89,23 @@ keeps hot data in memory, so most reads never touch the disk.
 
 ## 📊 Benchmarks
 
-*Coming in Phase 9.* Talus will be benchmarked against **LevelDB and RocksDB**
+Phase 9 tools are available. Talus will be benchmarked against **LevelDB and RocksDB**
 with matched settings: closed-loop and open-loop (coordinated-omission-safe) load,
 latencies from p50 to p99.99, and `perf` hardware counters (IPC, cache misses, branch misses).
 
 The write-up will be honest, including where RocksDB wins and why.
+
+```bash
+./build/release/bench/db_bench --benchmarks=fillseq,readrandom --num=100000 --threads=2 --output=/tmp/talus-closed.json
+./build/release/bench/db_bench --benchmarks=fillseq,readrandom --num=100000 --threads=2 --rate=50000 --output=/tmp/talus-open.json
+./build/release/bench/ycsb --workload=a --records=100000 --operations=100000 --output=/tmp/talus-ycsb.json
+```
+
+For comparison engines, configure with `-DTalus_BENCH_COMPARE=ON` and select
+`--engine=leveldb` or `--engine=rocksdb`. Linux hardware counters require PMU access;
+macOS reports them unavailable. Local smoke runs validate the tools, and are not
+publishable performance results. See [benchmark instructions](docs/BENCHMARKS.md) and [current status](docs/STATUS.md).
+
 
 ---
 

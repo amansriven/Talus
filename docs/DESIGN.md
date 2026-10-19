@@ -9,6 +9,7 @@ components not yet built are absent rather than stubbed.
 
 | Topic | Decision | Rationale |
 |---|---|---|
+| Benchmark clock on macOS ARM64 | Use `mach_absolute_time()`; retain CNTVCT on other ARM64 platforms and RDTSCP on x86-64. Calibrate against CLOCK_MONOTONIC and select a steady-clock fallback if the counter stops, moves backward, or gives an implausible ratio. | Direct CNTVCT reads produced backward timestamps on the development Mac, invalidating throughput and open-loop scheduling. Clock selection is initialized once for a consistent domain across all threads. |
 | Byte order | All fixed-width integers are little-endian. Big-endian hosts are rejected at compile time (`static_assert` in `src/util/coding.h`). | Both target platforms (x86-64, ARM64) are little-endian; encoding with `memcpy` is then a single load/store. |
 | Stored CRCs | Every CRC-32C written to disk is **masked** (§3.2). | Same as LevelDB: computing a CRC over data that itself contains CRCs is otherwise prone to degenerate results. |
 | Varint strictness | Decoders reject encodings longer than the maximum, and final bytes that would overflow the destination type. | LevelDB silently truncates such values. Rejecting them turns corrupt input into `Corruption` rather than a wrong value. |

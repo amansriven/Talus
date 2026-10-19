@@ -1,5 +1,6 @@
 #include "engine.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
@@ -52,14 +53,17 @@ std::string JsonString(std::string_view s) {
 
 std::string EngineConfig::ToJson() const {
   std::ostringstream o;
-  o << std::boolalpha << "{\"path\":" << JsonString(path) << ",\"sync\":" << (sync ? "true" : "false")
-    << ",\"memtable_size\":" << memtable_size << ",\"block_size\":" << block_size
-    << ",\"bloom_bits_per_key\":" << bloom_bits_per_key << ",\"block_cache_size\":" << block_cache_size
-    << ",\"max_open_files\":" << max_open_files << ",\"target_file_size\":" << target_file_size
-    << ",\"l1_max_bytes\":" << l1_max_bytes << ",\"level_size_multiplier\":" << level_size_multiplier
-    << ",\"num_levels\":" << num_levels << ",\"l0_compaction_trigger\":" << l0_compaction_trigger
-    << ",\"l0_slowdown_trigger\":" << l0_slowdown_trigger << ",\"l0_stop_trigger\":" << l0_stop_trigger
-    << ",\"max_background_compactions\":" << max_background_compactions << ",\"compression\":\"none\""
+  o << std::boolalpha << "{\"path\":" << JsonString(path)
+    << ",\"sync\":" << (sync ? "true" : "false") << ",\"memtable_size\":" << memtable_size
+    << ",\"block_size\":" << block_size << ",\"bloom_bits_per_key\":" << bloom_bits_per_key
+    << ",\"block_cache_size\":" << block_cache_size << ",\"max_open_files\":" << max_open_files
+    << ",\"target_file_size\":" << target_file_size << ",\"l1_max_bytes\":" << l1_max_bytes
+    << ",\"level_size_multiplier\":" << level_size_multiplier << ",\"num_levels\":" << num_levels
+    << ",\"l0_compaction_trigger\":" << l0_compaction_trigger
+    << ",\"l0_slowdown_trigger\":" << l0_slowdown_trigger
+    << ",\"l0_stop_trigger\":" << l0_stop_trigger
+    << ",\"max_background_compactions\":" << max_background_compactions
+    << ",\"compression\":\"none\""
     << ",\"talus\":{\"blocked_bloom\":" << blocked_bloom << ",\"mmap_reads\":" << mmap_reads
     << ",\"huge_pages\":" << huge_pages << ",\"group_commit\":" << group_commit
     << ",\"concurrent_memtable\":" << concurrent_memtable
@@ -79,6 +83,7 @@ class TalusIterator final : public EngineIterator {
   void Seek(std::string_view target) override { it_->Seek(target); }
   void SeekToFirst() override { it_->SeekToFirst(); }
   bool Valid() const override { return it_->Valid(); }
+  bool ok() const override { return it_->status().ok(); }
   void Next() override { it_->Next(); }
   std::string_view key() const override { return it_->key(); }
   std::string_view value() const override { return it_->value(); }
@@ -191,6 +196,7 @@ class LevelDBIterator final : public EngineIterator {
   void Seek(std::string_view t) override { it_->Seek(leveldb::Slice(t.data(), t.size())); }
   void SeekToFirst() override { it_->SeekToFirst(); }
   bool Valid() const override { return it_->Valid(); }
+  bool ok() const override { return it_->status().ok(); }
   void Next() override { it_->Next(); }
   std::string_view key() const override { return {it_->key().data(), it_->key().size()}; }
   std::string_view value() const override { return {it_->value().data(), it_->value().size()}; }
@@ -272,6 +278,7 @@ class RocksDBIterator final : public EngineIterator {
   void Seek(std::string_view t) override { it_->Seek(rocksdb::Slice(t.data(), t.size())); }
   void SeekToFirst() override { it_->SeekToFirst(); }
   bool Valid() const override { return it_->Valid(); }
+  bool ok() const override { return it_->status().ok(); }
   void Next() override { it_->Next(); }
   std::string_view key() const override { return {it_->key().data(), it_->key().size()}; }
   std::string_view value() const override { return {it_->value().data(), it_->value().size()}; }
@@ -296,6 +303,7 @@ class RocksDBEngine final : public Engine {
     o.write_buffer_size = c.memtable_size;
     o.max_write_buffer_number = 2;  // Active + one immutable, as in Talus.
     o.target_file_size_base = c.target_file_size;
+    o.level_compaction_dynamic_level_bytes = false;
     o.max_bytes_for_level_base = c.l1_max_bytes;
     o.max_bytes_for_level_multiplier = c.level_size_multiplier;
     o.num_levels = c.num_levels;
@@ -364,11 +372,28 @@ std::vector<std::string> AvailableEngines() {
 
 std::unique_ptr<Engine> OpenEngine(const std::string& name, const EngineConfig& config,
                                    std::string* error) {
+  const auto engines = AvailableEngines();
+  if (std::find(engines.begin(), engines.end(), name) == engines.end()) {
+    *error = "unknown or not built-in engine: " + name;
+    return nullptr;
+  }
   if (config.fresh) {
     std::error_code ec;
     std::filesystem::remove_all(config.path, ec);
+    if (ec) {
+      *error = ec.message();
+      return nullptr;
+    }
   }
-  std::filesystem::create_directories(std::filesystem::path(config.path).parent_path());
+  const auto parent = std::filesystem::path(config.path).parent_path();
+  if (!parent.empty()) {
+    std::error_code ec;
+    std::filesystem::create_directories(parent, ec);
+    if (ec) {
+      *error = ec.message();
+      return nullptr;
+    }
+  }
   if (name == "talus") {
     auto engine = std::make_unique<TalusEngine>(config);
     const Status s = engine->Open(config);

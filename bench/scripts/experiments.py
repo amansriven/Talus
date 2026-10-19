@@ -37,7 +37,7 @@ class Ctx:
 
     def threads(self) -> list[int]:
         ts, t = [], 1
-        while t <= (4 if self.quick else self.max_threads):
+        while t <= (min(4, self.max_threads) if self.quick else self.max_threads):
             ts.append(t)
             t *= 2
         return ts
@@ -75,7 +75,7 @@ def exp_group_commit(c: Ctx) -> None:
         label = "group commit" if gc else "no grouping"
         for t in c.threads():
             data = c.db_bench(exp, f"gc{int(gc)}_t{t}", benchmarks="fillrandom", sync=True,
-                              group_commit=gc, threads=t, num=c.n(400_000, 4_000) * t,
+                              group_commit=gc, threads=t, num=c.n(400_000, 128) * t,
                               duration=c.n(20, 3))
             entry = tb.result(data, "fillrandom")
             run = tb.median_run(entry)
@@ -132,7 +132,8 @@ def exp_super_version(c: Ctx) -> None:
             tput.setdefault(label, []).append((t, entry["summary"]["ops_per_sec"]["median"]))
             rows.append([label, t, entry["summary"]["ops_per_sec"]["median"],
                          entry["summary"]["p999_ns"]["median"] / 1e3,
-                         run["engine_stats"]["super_version_slow_path"], perf(run, "cycles_per_op")])
+                         run["engine_stats"]["super_version_slow_path"] -
+                         run["initial_engine_stats"]["super_version_slow_path"], perf(run, "cycles_per_op")])
     tb.plot_throughput_vs_threads(tput, c.out / exp / "throughput.png", "readrandom: SuperVersion acquisition")
     table(c.out / exp / "summary.md", ["variant", "threads", "ops/s", "p99.9 µs", "slow-path acquisitions",
                                        "cycles/op"],
@@ -173,7 +174,7 @@ def exp_rate_limiter(c: Ctx) -> None:
     for limit in (0, c.n(16 << 20, 4 << 20)):
         label = "limiter off" if limit == 0 else f"limit {limit >> 20} MiB/s"
         data = c.db_bench(exp, f"limit{limit}", benchmarks="fillrandom,readwhilewriting",
-                          rate_limit=limit, threads=4, num=c.n(2_000_000, 100_000),
+                          rate_limit=limit, threads=min(4, c.max_threads), num=c.n(2_000_000, 100_000),
                           rate=c.n(100_000, 20_000), duration=c.n(60, 5), max_background_compactions=2)
         entry = tb.result(data, "readwhilewriting")
         run = tb.median_run(entry)
@@ -221,7 +222,8 @@ def exp_mmap_hugepages(c: Ctx) -> None:
 def exp_prefetch(c: Ctx) -> None:
     exp = "7_prefetch"
     data = tb.run_micro(c.build, c.out / exp / "micro.json", "BM_SkipListLookup",
-                        repetitions=1 if c.quick else 5, cpus=c.cpus)
+                        repetitions=1 if c.quick else 5, cpus=c.cpus,
+                        min_time="0.001s" if c.quick else "0.5s")
     rows, bars = [], {}
     for b in data["benchmarks"]:
         if b.get("run_type") == "aggregate" and b.get("aggregate_name") != "median":
@@ -253,6 +255,8 @@ def main() -> None:
     ap.add_argument("--cpus", default=None, help="taskset CPU list for the benchmark process (Linux)")
     ap.add_argument("--db", default="/tmp/talus_exp_db")
     args = ap.parse_args()
+    if args.max_threads <= 0 or args.repetitions <= 0:
+        ap.error("max-threads and repetitions must be positive")
     ctx = Ctx(args)
     args.out.mkdir(parents=True, exist_ok=True)
     tb.save_json(args.out / "hardware.json", tb.hardware_info(args.db))

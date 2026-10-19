@@ -3,13 +3,19 @@
 #include <hdr/hdr_histogram.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <thread>
+
+#if defined(__linux__)
+#include <sched.h>
+#endif
 
 #include "timer.h"
 #include "util/port.h"
@@ -38,17 +44,37 @@ std::string Flags::Str(const std::string& name, const std::string& fallback) con
 
 int64_t Flags::Int(const std::string& name, int64_t fallback) const {
   const std::string v = Str(name, "");
-  return v.empty() ? fallback : std::strtoll(v.c_str(), nullptr, 10);
+  if (v.empty()) return fallback;
+  char* end = nullptr;
+  errno = 0;
+  const auto result = std::strtoll(v.c_str(), &end, 10);
+  if (errno == ERANGE || end == v.c_str() || *end != '\0') {
+    std::fprintf(stderr, "invalid integer --%s=%s\n", name.c_str(), v.c_str());
+    std::exit(2);
+  }
+  return result;
 }
 
 double Flags::Double(const std::string& name, double fallback) const {
   const std::string v = Str(name, "");
-  return v.empty() ? fallback : std::strtod(v.c_str(), nullptr);
+  if (v.empty()) return fallback;
+  char* end = nullptr;
+  errno = 0;
+  const double result = std::strtod(v.c_str(), &end);
+  if (errno == ERANGE || end == v.c_str() || *end != '\0' || !std::isfinite(result)) {
+    std::fprintf(stderr, "invalid number --%s=%s\n", name.c_str(), v.c_str());
+    std::exit(2);
+  }
+  return result;
 }
 
 bool Flags::Bool(const std::string& name, bool fallback) const {
   const std::string v = Str(name, "");
-  return v.empty() ? fallback : (v == "1" || v == "true");
+  if (v.empty()) return fallback;
+  if (v == "1" || v == "true") return true;
+  if (v == "0" || v == "false") return false;
+  std::fprintf(stderr, "invalid boolean --%s=%s\n", name.c_str(), v.c_str());
+  std::exit(2);
 }
 
 void Flags::CheckAllUsed() const {
@@ -74,6 +100,13 @@ std::string Flags::ToJson() const {
 
 EngineConfig EngineConfigFromFlags(const Flags& f) {
   EngineConfig c;
+  for (const char* name : {"memtable_size", "block_size", "cache_size", "target_file_size",
+                           "l1_max_bytes", "rate_limit", "spin", "bloom_bits"}) {
+    if (f.Int(name, 0) < 0) {
+      std::fprintf(stderr, "--%s must be nonnegative\n", name);
+      std::exit(2);
+    }
+  }
   c.path = f.Str("db", "/tmp/talus_bench");
   c.fresh = !f.Bool("use_existing_db", false);
   c.sync = f.Bool("sync", false);
@@ -100,14 +133,21 @@ EngineConfig EngineConfigFromFlags(const Flags& f) {
       c.background_cpus.push_back(std::atoi(cpu.c_str()));
     }
   }
+  if (c.memtable_size == 0 || c.block_size == 0 || c.target_file_size == 0 || c.l1_max_bytes == 0 ||
+      c.max_open_files <= 0 || c.max_background_compactions <= 0) {
+    std::fprintf(stderr, "engine sizes and worker counts must be positive\n");
+    std::exit(2);
+  }
   return c;
 }
 
 // ---- Histogram ------------------------------------------------------------------
 
 namespace {
-constexpr int64_t kMaxTrackableNanos = 60'000'000'000;  // 60 s.
-}
+// Keep long open-loop queues visible rather than clipping tails at 60 seconds.
+// Half INT64_MAX leaves room for HdrHistogram's internal bucket rounding.
+constexpr int64_t kMaxTrackableNanos = std::numeric_limits<int64_t>::max() / 2;
+}  // namespace
 
 Histogram::Histogram(int significant_figures) {
   if (hdr_init(1, kMaxTrackableNanos, significant_figures, &h_) != 0) {
@@ -135,7 +175,7 @@ Histogram& Histogram::operator=(Histogram&& other) noexcept {
 }
 
 void Histogram::Record(uint64_t nanos) {
-  hdr_record_value(h_, std::clamp<int64_t>(static_cast<int64_t>(nanos), 1, kMaxTrackableNanos));
+  hdr_record_value(h_, static_cast<int64_t>(std::clamp<uint64_t>(nanos, 1, kMaxTrackableNanos)));
 }
 
 void Histogram::Add(const Histogram& other) { hdr_add(h_, other.h_); }
@@ -211,7 +251,24 @@ void WaitUntil(uint64_t target) {
 
 }  // namespace
 
+std::vector<int> BenchmarkCpus() {
+  std::vector<int> cpus;
+#if defined(__linux__)
+  cpu_set_t allowed;
+  CPU_ZERO(&allowed);
+  if (sched_getaffinity(0, sizeof(allowed), &allowed) != 0) {
+    std::perror("sched_getaffinity");
+    std::exit(1);
+  }
+  for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
+    if (CPU_ISSET(cpu, &allowed)) cpus.push_back(cpu);
+  }
+#endif
+  return cpus;
+}
+
 RunResult RunWorkload(const RunSpec& spec, const OpFn& op) {
+  const auto cpus = BenchmarkCpus();
   const double ticks_per_second = 1e9 / CycleClock::NanosPerTick();
   std::vector<ThreadOutput> outputs(static_cast<size_t>(spec.threads));
   std::atomic<int> ready{0};
@@ -223,7 +280,15 @@ RunResult RunWorkload(const RunSpec& spec, const OpFn& op) {
   for (int t = 0; t < spec.threads; ++t) {
     workers.emplace_back([&, t] {
       if (spec.pin_cpus) {
-        PinCurrentThreadToCpus({t % static_cast<int>(std::thread::hardware_concurrency())});
+#if defined(__linux__)
+        cpu_set_t selected;
+        CPU_ZERO(&selected);
+        CPU_SET(cpus[static_cast<size_t>(t) % cpus.size()], &selected);
+        if (sched_setaffinity(0, sizeof(selected), &selected) != 0) {
+          std::perror("benchmark CPU affinity");
+          std::exit(1);
+        }
+#endif
       }
       std::mt19937_64 rng(0x9E3779B97F4A7C15ULL * static_cast<uint64_t>(t + 1));
       for (uint64_t i = 0; i < spec.warmup_ops_per_thread; ++i) {
@@ -244,12 +309,14 @@ RunResult RunWorkload(const RunSpec& spec, const OpFn& op) {
       const double phase_ticks = spec.target_rate > 0 ? ticks_per_second * t / spec.target_rate : 0;
 
       perf.Start();
-      for (uint64_t i = 0; i < spec.ops_per_thread; ++i) {
+      for (uint64_t i = 0;
+           i < spec.ops_per_thread + (static_cast<uint64_t>(t) < spec.extra_ops ? 1 : 0); ++i) {
         uint64_t start = 0;
         if (spec.target_rate > 0) {
           // Open loop: latency runs from the scheduled start, so time spent
           // waiting behind a slow operation is counted.
           start = t0 + static_cast<uint64_t>(phase_ticks + interval_ticks * static_cast<double>(i));
+          if (max_ticks > 0 && start - t0 >= max_ticks) break;
           WaitUntil(start);
         } else {
           start = CycleClock::Now();
@@ -272,6 +339,7 @@ RunResult RunWorkload(const RunSpec& spec, const OpFn& op) {
   while (ready.load(std::memory_order_acquire) < spec.threads) {
     std::this_thread::yield();
   }
+  const std::string initial_stats = spec.stats_sampler ? spec.stats_sampler() : "{}";
   std::thread background;
   if (spec.background) {
     background = std::thread([&] { spec.background(stop); });
@@ -308,6 +376,7 @@ RunResult RunWorkload(const RunSpec& spec, const OpFn& op) {
   }
 
   RunResult result;
+  result.initial_stats = initial_stats;
   result.bytes_per_op = spec.bytes_per_op;
   result.stats_series = std::move(stats_series);
   uint64_t end = t0;
@@ -331,16 +400,16 @@ RunResult RunWorkload(const RunSpec& spec, const OpFn& op) {
 
 std::string RunResult::ToJson() const {
   std::ostringstream o;
-  o << "{\"ops\":" << ops << ",\"errors\":" << errors << ",\"seconds\":" << seconds
-    << ",\"ops_per_sec\":" << OpsPerSec()
+  o << "{\"initial_engine_stats\":" << initial_stats << ",\"ops\":" << ops
+    << ",\"errors\":" << errors << ",\"seconds\":" << seconds << ",\"ops_per_sec\":" << OpsPerSec()
     << ",\"mb_per_sec\":" << OpsPerSec() * static_cast<double>(bytes_per_op) / 1048576.0
     << ",\"latency_ns\":" << latency.ToJson(/*with_cdf=*/true) << ",\"timeseries\":[";
   for (size_t s = 0; s < per_second.size(); ++s) {
     const Histogram& h = per_second[s].latency;
     o << (s > 0 ? "," : "") << "{\"second\":" << s << ",\"ops\":" << per_second[s].ops
       << ",\"p50\":" << h.Percentile(50) << ",\"p99\":" << h.Percentile(99)
-      << ",\"p999\":" << h.Percentile(99.9) << ",\"p9999\":" << h.Percentile(99.99)
-      << ",\"max\":" << h.Max() << "}";
+      << ",\"p90\":" << h.Percentile(90) << ",\"p999\":" << h.Percentile(99.9)
+      << ",\"p9999\":" << h.Percentile(99.99) << ",\"max\":" << h.Max() << "}";
   }
   o << "],\"perf\":" << perf.ToJson(ops) << ",\"stats_series\":[";
   for (size_t s = 0; s < stats_series.size(); ++s) {
@@ -358,7 +427,9 @@ std::string SummarizeJson(const std::vector<RunResult>& runs) {
     }
     std::sort(v.begin(), v.end());
     const double median =
-        v.empty() ? 0 : (v.size() % 2 == 1 ? v[v.size() / 2] : (v[v.size() / 2 - 1] + v[v.size() / 2]) / 2);
+        v.empty()
+            ? 0
+            : (v.size() % 2 == 1 ? v[v.size() / 2] : (v[v.size() / 2 - 1] + v[v.size() / 2]) / 2);
     double mean = 0;
     for (double x : v) {
       mean += x;
@@ -376,10 +447,16 @@ std::string SummarizeJson(const std::vector<RunResult>& runs) {
   std::ostringstream o;
   o << "{\"repetitions\":" << runs.size()
     << ",\"ops_per_sec\":" << stats([](const RunResult& r) { return r.OpsPerSec(); })
+    << ",\"mb_per_sec\":" << stats([](const RunResult& r) {
+         return r.OpsPerSec() * static_cast<double>(r.bytes_per_op) / 1048576.0;
+       })
+    << ",\"p90_ns\":" << stats([](const RunResult& r) { return double(r.latency.Percentile(90)); })
     << ",\"p50_ns\":" << stats([](const RunResult& r) { return double(r.latency.Percentile(50)); })
     << ",\"p99_ns\":" << stats([](const RunResult& r) { return double(r.latency.Percentile(99)); })
-    << ",\"p999_ns\":" << stats([](const RunResult& r) { return double(r.latency.Percentile(99.9)); })
-    << ",\"p9999_ns\":" << stats([](const RunResult& r) { return double(r.latency.Percentile(99.99)); })
+    << ",\"p999_ns\":"
+    << stats([](const RunResult& r) { return double(r.latency.Percentile(99.9)); })
+    << ",\"p9999_ns\":"
+    << stats([](const RunResult& r) { return double(r.latency.Percentile(99.99)); })
     << ",\"max_ns\":" << stats([](const RunResult& r) { return double(r.latency.Max()); }) << "}";
   return o.str();
 }
@@ -393,6 +470,15 @@ std::string EnvironmentJson() {
   for (size_t i = 0; i < engines.size(); ++i) {
     o << (i > 0 ? "," : "") << JsonString(engines[i]);
   }
+  o << "],\"affinity_supported\":";
+#if defined(__linux__)
+  o << "true";
+#else
+  o << "false";
+#endif
+  o << ",\"allowed_cpus\":[";
+  const auto cpus = BenchmarkCpus();
+  for (size_t i = 0; i < cpus.size(); ++i) o << (i ? "," : "") << cpus[i];
   o << "]}";
   return o.str();
 }
@@ -402,7 +488,13 @@ void WriteJson(const std::string& path, const std::string& json) {
     std::cout << json << "\n";
     return;
   }
-  std::ofstream(path) << json << "\n";
+  std::ofstream out(path);
+  out << json << "\n";
+  out.close();
+  if (!out) {
+    std::fprintf(stderr, "cannot write JSON to %s\n", path.c_str());
+    std::exit(1);
+  }
   std::fprintf(stderr, "wrote %s\n", path.c_str());
 }
 

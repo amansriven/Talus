@@ -40,7 +40,9 @@ uint64_t Fnv64(uint64_t v) {
   return h;
 }
 
-std::string RecordKey(uint64_t n) { return "user" + MakeKey(Fnv64(n) % 10'000'000'000'000'000'000ULL, 19); }
+std::string RecordKey(uint64_t n) {
+  return "user" + MakeKey(Fnv64(n) % 10'000'000'000'000'000'000ULL, 19);
+}
 
 // YCSB's ZipfianGenerator (Gray et al., "Quickly generating billion-record
 // synthetic databases"): item i is drawn with probability proportional to
@@ -48,6 +50,7 @@ std::string RecordKey(uint64_t n) { return "user" + MakeKey(Fnv64(n) % 10'000'00
 class Zipfian {
  public:
   Zipfian(uint64_t items, double theta = 0.99) : items_(items), theta_(theta) {
+    if (items <= 2) return;
     zeta_n_ = Zeta(items, theta);
     const double zeta2 = Zeta(2, theta);
     alpha_ = 1.0 / (1.0 - theta);
@@ -55,6 +58,7 @@ class Zipfian {
   }
 
   uint64_t Next(std::mt19937_64& rng) const {
+    if (items_ <= 2) return rng() % items_;
     const double u = std::uniform_real_distribution<double>(0, 1)(rng);
     const double uz = u * zeta_n_;
     if (uz < 1.0) {
@@ -78,9 +82,9 @@ class Zipfian {
 
   uint64_t items_;
   double theta_;
-  double zeta_n_;
-  double alpha_;
-  double eta_;
+  double zeta_n_ = 0;
+  double alpha_ = 0;
+  double eta_ = 0;
 };
 
 struct Mix {
@@ -114,7 +118,8 @@ Mix MixFor(char workload) {
 int Main(int argc, char** argv) {
   const Flags flags(argc, argv);
   const std::string workload_name = flags.Str("workload", "a");
-  const char workload = static_cast<char>(std::tolower(workload_name.empty() ? 'a' : workload_name[0]));
+  const char workload =
+      static_cast<char>(std::tolower(workload_name.empty() ? 'a' : workload_name[0]));
   const auto records = static_cast<uint64_t>(flags.Int("records", 1'000'000));
   const auto operations = static_cast<uint64_t>(flags.Int("operations", 1'000'000));
   const std::string distribution = flags.Str("distribution", "zipfian");
@@ -135,6 +140,13 @@ int Main(int argc, char** argv) {
     std::fprintf(stderr, "--distribution must be zipfian or uniform\n");
     return 2;
   }
+  if (threads <= 0 || records < static_cast<uint64_t>(threads) || records > INT64_MAX ||
+      operations == 0 || operations > INT64_MAX || max_scan == 0 || max_scan > INT64_MAX ||
+      value_size > (1ULL << 30) || repetitions <= 0 || rate < 0 || duration < 0 ||
+      warmup > INT64_MAX) {
+    std::fprintf(stderr, "invalid YCSB counts, sizes, rate or duration\n");
+    return 2;
+  }
   const Mix mix = MixFor(workload);
   const ValueSource values(value_size);
 
@@ -148,17 +160,22 @@ int Main(int argc, char** argv) {
   Engine* e = engine.get();
 
   // Load phase: insert every record (measured too, as "load").
+  bool had_errors = false;
   std::string results;
   if (!skip_load) {
     RunSpec load;
     load.threads = threads;
     load.ops_per_thread = records / static_cast<uint64_t>(threads);
+    load.extra_ops = records % static_cast<uint64_t>(threads);
     load.pin_cpus = pin;
     load.bytes_per_op = 23 + value_size;
     const uint64_t per_thread = load.ops_per_thread;
     RunResult r = RunWorkload(load, [&](int t, uint64_t i, std::mt19937_64& rng) {
-      return e->Put(RecordKey(static_cast<uint64_t>(t) * per_thread + i), values.Next(rng));
+      return e->Put(RecordKey(static_cast<uint64_t>(t) * per_thread +
+                              std::min(static_cast<uint64_t>(t), load.extra_ops) + i),
+                    values.Next(rng));
     });
+    had_errors = had_errors || r.errors != 0;
     e->WaitForCompactions();
     std::fprintf(stderr, "load: %llu records, %.0f ops/s\n", static_cast<unsigned long long>(r.ops),
                  r.OpsPerSec());
@@ -189,6 +206,7 @@ int Main(int argc, char** argv) {
     RunSpec spec;
     spec.threads = threads;
     spec.ops_per_thread = operations / static_cast<uint64_t>(threads);
+    spec.extra_ops = operations % static_cast<uint64_t>(threads);
     spec.target_rate = rate;
     spec.max_seconds = duration;
     spec.warmup_ops_per_thread = warmup;
@@ -206,7 +224,8 @@ int Main(int argc, char** argv) {
       }
       if (dice < (edge += mix.insert)) {
         // Relaxed: only uniqueness of the new record number matters.
-        return e->Put(RecordKey(inserted.fetch_add(1, std::memory_order_relaxed)), values.Next(rng));
+        return e->Put(RecordKey(inserted.fetch_add(1, std::memory_order_relaxed)),
+                      values.Next(rng));
       }
       if (dice < (edge += mix.scan)) {
         auto iter = e->NewIterator();
@@ -216,7 +235,7 @@ int Main(int argc, char** argv) {
           volatile size_t sink = iter->value().size();
           (void)sink;
         }
-        return true;
+        return iter->ok();
       }
       // Read-modify-write.
       const std::string key = RecordKey(pick_existing(rng));
@@ -226,25 +245,28 @@ int Main(int argc, char** argv) {
       }
       return e->Put(key, values.Next(rng));
     });
+    had_errors = had_errors || r.errors != 0;
     e->WaitForCompactions();
-    std::fprintf(stderr, "workload %c rep %d: %.0f ops/s  p50 %.2f us  p99 %.2f us  p99.9 %.2f us\n",
+    std::fprintf(stderr,
+                 "workload %c rep %d: %.0f ops/s  p50 %.2f us  p99 %.2f us  p99.9 %.2f us\n",
                  workload, rep + 1, r.OpsPerSec(), r.latency.Percentile(50) / 1e3,
                  r.latency.Percentile(99) / 1e3, r.latency.Percentile(99.9) / 1e3);
-    reps_json += (rep > 0 ? "," : "") +
-                 r.ToJson().insert(1, "\"engine_stats\":" + e->StatsJson() + ",");
+    reps_json +=
+        (rep > 0 ? "," : "") + r.ToJson().insert(1, "\"engine_stats\":" + e->StatsJson() + ",");
     runs.push_back(std::move(r));
   }
   results += (results.empty() ? "" : ",") + std::string("{\"benchmark\":\"workload_") + workload +
              "\",\"summary\":" + SummarizeJson(runs) + ",\"repetitions\":[" + reps_json + "]}";
   engine.reset();
 
-  WriteJson(output, "{\"tool\":\"ycsb\",\"engine\":" + JsonString(engine_name) +
-                        ",\"workload\":" + JsonString(std::string(1, workload)) +
-                        ",\"distribution\":" + JsonString(workload == 'd' ? "latest" : distribution) +
-                        ",\"load\":" + (rate > 0 ? "\"open\"" : "\"closed\"") +
-                        ",\"flags\":" + flags.ToJson() + ",\"engine_config\":" + ec.ToJson() +
-                        ",\"environment\":" + EnvironmentJson() + ",\"results\":[" + results + "]}");
-  return 0;
+  WriteJson(output,
+            "{\"tool\":\"ycsb\",\"engine\":" + JsonString(engine_name) +
+                ",\"workload\":" + JsonString(std::string(1, workload)) +
+                ",\"distribution\":" + JsonString(workload == 'd' ? "latest" : distribution) +
+                ",\"load\":" + (rate > 0 ? "\"open\"" : "\"closed\"") +
+                ",\"flags\":" + flags.ToJson() + ",\"engine_config\":" + ec.ToJson() +
+                ",\"environment\":" + EnvironmentJson() + ",\"results\":[" + results + "]}");
+  return had_errors ? 1 : 0;
 }
 
 }  // namespace
