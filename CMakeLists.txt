@@ -14,6 +14,7 @@ endif()
 option(Talus_BUILD_TESTS "Build unit and integration tests" ON)
 option(Talus_WITH_LZ4 "Enable optional LZ4 block compression" OFF)
 option(Talus_BENCH_COMPARE "Build LevelDB and RocksDB for comparison benchmarks" OFF)
+option(Talus_BUILD_FUZZERS "Build libFuzzer targets (clang with libFuzzer required)" OFF)
 set(Talus_SANITIZE "" CACHE STRING "Sanitizers to enable, e.g. 'address;undefined' or 'thread'")
 
 # Sanitizers apply to every target, dependencies included, so that TSan sees
@@ -23,6 +24,16 @@ if(Talus_SANITIZE)
   add_compile_options(-fsanitize=${_talus_sanitizers} -fno-omit-frame-pointer
                       -fno-sanitize-recover=all)
   add_link_options(-fsanitize=${_talus_sanitizers})
+endif()
+
+# Fuzzing instruments everything (so coverage reaches the library) with
+# ASan and UBSan; only the fuzz executables link the libFuzzer runtime.
+if(Talus_BUILD_FUZZERS)
+  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    message(FATAL_ERROR "Talus_BUILD_FUZZERS requires clang")
+  endif()
+  add_compile_options(-fsanitize=fuzzer-no-link,address,undefined -fno-omit-frame-pointer)
+  add_link_options(-fsanitize=address,undefined)
 endif()
 
 # Strict warnings apply only to Talus's own targets, not to fetched dependencies.
@@ -38,3 +49,4 @@ if(Talus_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)
 endif()
+add_subdirectory(fuzz)

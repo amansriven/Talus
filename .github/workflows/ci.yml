@@ -49,3 +49,25 @@ jobs:
         run: cmake --build --preset release
       - name: Test
         run: ctest --preset release
+
+  fuzz:
+    name: ubuntu / libFuzzer (60 s per target)
+    runs-on: ubuntu-24.04
+    env:
+      CC: clang
+      CXX: clang++
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y ninja-build libclang-rt-18-dev
+      - name: Configure
+        run: cmake --preset fuzz
+      - name: Build
+        run: cmake --build --preset fuzz
+      - name: Fuzz
+        run: |
+          cd build/fuzz
+          ./fuzz/talus_fuzz_seeds corpus
+          for t in block_reader sstable_reader wal_reader version_edit; do
+            ./fuzz/fuzz_$t -max_total_time=60 -close_fd_mask=3 corpus/$t
+          done

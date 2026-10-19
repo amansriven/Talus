@@ -9,9 +9,9 @@
 namespace talus {
 
 GroupCommitter::GroupCommitter(log::Writer* log, MemTable* mem, SequenceNumber last_sequence,
-                               int spin_iterations, PrepareFn prepare)
+                               int spin_iterations, Hooks hooks)
     : write_thread_(spin_iterations),
-      prepare_(std::move(prepare)),
+      hooks_(std::move(hooks)),
       log_(log),
       mem_(mem),
       last_sequence_(last_sequence),
@@ -32,8 +32,8 @@ Status GroupCommitter::Write(const WriteOptions& options, WriteBatch* batch) {
   // We lead. Prepare first, so writers arriving during a stall still join
   // this group.
   Status s = error_;
-  if (s.ok() && prepare_) {
-    s = prepare_();
+  if (s.ok() && hooks_.prepare) {
+    s = hooks_.prepare();
   }
   WriteThread::WriteGroup group;
   write_thread_.EnterAsBatchGroupLeader(&w, &group);
@@ -46,10 +46,14 @@ Status GroupCommitter::Write(const WriteOptions& options, WriteBatch* batch) {
       next += WriteBatchInternal::Count(*m->batch);
       need_sync = need_sync || m->sync;
     });
-    s = WriteToLog(group, need_sync);
+    size_t record_bytes = 0;
+    s = WriteToLog(group, need_sync, &record_bytes);
     if (s.ok()) {
       last_sequence_ = next - 1;
       group.last_sequence = last_sequence_;
+      if (hooks_.on_logged) {
+        hooks_.on_logged(group.size, record_bytes);
+      }
     } else {
       error_ = s;
     }
@@ -83,7 +87,8 @@ void GroupCommitter::FinishParallelWrite(WriteThread::Writer* w) {
   }
 }
 
-Status GroupCommitter::WriteToLog(const WriteThread::WriteGroup& group, bool need_sync) {
+Status GroupCommitter::WriteToLog(const WriteThread::WriteGroup& group, bool need_sync,
+                                  size_t* record_bytes) {
   std::string_view record;
   if (group.size == 1) {
     record = WriteBatchInternal::Contents(*group.leader->batch);
@@ -104,6 +109,7 @@ Status GroupCommitter::WriteToLog(const WriteThread::WriteGroup& group, bool nee
     EncodeFixed32(merged_.data() + 8, count);
     record = merged_;
   }
+  *record_bytes = record.size();
   Status s = log_->AddRecord(record);
   if (s.ok() && need_sync) {
     s = log_->Sync();

@@ -3,6 +3,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <list>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -11,6 +12,7 @@
 #include <thread>
 #include <vector>
 
+#include "Talus/db.h"
 #include "Talus/options.h"
 #include "Talus/status.h"
 #include "Talus/write_batch.h"
@@ -26,16 +28,9 @@
 
 namespace talus {
 
-// Read-side options for DBImpl::Get. Phase 7's public ReadOptions maps onto
-// these.
-struct GetOptions {
-  SequenceNumber snapshot = kMaxSequenceNumber;  // kMax: read the latest state.
-  bool fill_cache = true;
-};
-
-// Counters for background work, guarded by the DB mutex, plus summed
-// per-thread counters.
-struct DBInternalStats {
+// Counters for background work (off the hot paths), guarded by the DB
+// mutex. Hot-path counters live in per-thread slots instead.
+struct BackgroundStats {
   uint64_t flushes = 0;
   uint64_t flush_micros = 0;
   uint64_t flush_bytes_written = 0;
@@ -46,10 +41,6 @@ struct DBInternalStats {
   uint64_t rate_limiter_wait_micros = 0;
   uint64_t stall_count = 0;
   uint64_t stall_micros = 0;
-  uint64_t super_version_fast_path = 0;
-  uint64_t super_version_slow_path = 0;
-  std::vector<int> files_per_level;
-  std::vector<uint64_t> bytes_per_level;
 };
 
 // The storage engine: write path, read path, recovery, flush, compaction.
@@ -74,7 +65,9 @@ class DBImpl {
   Status Write(const WriteOptions& options, WriteBatch* batch);
   Status Put(const WriteOptions& options, std::string_view key, std::string_view value);
   Status Delete(const WriteOptions& options, std::string_view key);
-  Status Get(const GetOptions& options, std::string_view key, std::string* value);
+  Status Get(const ReadOptions& options, std::string_view key, std::string* value);
+  Status Get(const ReadOptions& options, std::string_view key, PinnableValue* value);
+  std::unique_ptr<Iterator> NewIterator(const ReadOptions& options);
 
   // Switches to a new memtable (if the current one is not empty), then
   // waits until every memtable written so far has been flushed.
@@ -85,12 +78,10 @@ class DBImpl {
   // means unbounded.
   Status CompactRange(std::string_view begin, std::string_view end);
 
-  // A read sequence that compaction preserves until released. Phase 7 wraps
-  // these in Snapshot objects.
-  SequenceNumber AcquireSnapshot();
-  void ReleaseSnapshot(SequenceNumber sequence);
+  const Snapshot* GetSnapshot();
+  void ReleaseSnapshot(const Snapshot* snapshot);
 
-  DBInternalStats GetInternalStats();
+  DBStats GetStats();
 
   // Blocks until no flush is pending, no compaction is running, and no
   // level needs compacting (or a background error occurs, which it
@@ -106,8 +97,12 @@ class DBImpl {
   // Write path (run by the group-commit leader before each group).
   Status MakeRoomForWrite();
 
-  // Read path.
+  // Read path. GetImpl fills exactly one of `copy` and `pinned`.
+  Status GetImpl(const ReadOptions& options, std::string_view key, std::string* copy,
+                 PinnableValue* pinned);
   SuperVersion* AcquireSuperVersion(ThreadSlot* slot);
+  // Per-thread statistics for one committed write group (group-commit hook).
+  void RecordWriteGroup(size_t members, size_t wal_bytes);
   void InstallSuperVersion();  // REQUIRES: mu_ held.
 
   // Background work. Functions taking a lock require it held, and may
@@ -158,12 +153,14 @@ class DBImpl {
   // Background state, guarded by mu_.
   std::set<uint64_t> pending_outputs_;  // Table files being written.
   std::vector<bool> busy_levels_;       // Levels reserved by running compactions.
-  std::multiset<SequenceNumber> snapshots_;
+  // Live snapshots, oldest first: each is created at the current visible
+  // sequence, which only grows, so appending keeps the list sorted.
+  std::list<Snapshot> snapshots_;
   Status bg_error_;  // Sticky: once set, writes and background work stop.
   bool force_flush_ = false;
   uint64_t memtables_switched_ = 0;
   uint64_t memtables_flushed_ = 0;
-  DBInternalStats stats_;
+  BackgroundStats stats_;
   std::atomic<bool> shutting_down_{false};
 
   std::thread flush_thread_;

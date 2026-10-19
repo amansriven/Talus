@@ -30,6 +30,9 @@ components not yet built are absent rather than stubbed.
 | Corrupt record in an older WAL during recovery | Replay of that WAL stops at the record, and replay continues with later WALs. | This matches LevelDB. "Everything after it" is read as the rest of that file. |
 | Empty `CompactRange` bounds | An empty `begin` or `end` means unbounded. | `std::string_view` has no null value. |
 | Which L0 file is newest | L0 is ordered by file number, which grows over time. | Flushes always write to L0 and compactions never do, so a higher number is always newer data. |
+| Value lifetime for a memtable hit in `Get(PinnableValue*)` | The value is pinned through a reference on the SuperVersion that holds the memtable. | This is what lets the memtable path avoid a copy. The cost is one atomic increment and one decrement on a shared counter per pinned memtable read. `Get(std::string*)` copies instead and avoids it. |
+| `DBStats::user_bytes_written` | The bytes of each batch's serialized operations (tags, length varints, keys and values), excluding the 12-byte batch header. | The spec does not define "bytes written by users". This is what the WAL actually stores per operation, so the WAL's write amplification is close to 1. |
+| Space amplification estimate | Live bytes ≈ the size of the deepest non-empty level, as in RocksDB's estimate. | Data that has been fully compacted ends up in the last level with one version per key. Upper levels hold newer versions and tombstones not yet merged. |
 | WAL write failure | Sticky. Every later write returns the same error. | A failed append can leave a partial record in the log, and recovery would drop every record after it. LevelDB has the same "background error" rule. |
 
 ## 2. Error handling
@@ -569,7 +572,7 @@ Readers never wait for flush or compaction.
   - *Install.* After syncing the outputs and the directory, one `LogAndApply` deletes the inputs and adds the outputs.
   - *Cleanup.* The compaction object, which holds its input Version, is destroyed before obsolete files are deleted. Otherwise its own inputs would survive until the next background job.
 - **Rate limiter (`src/util/rate_limiter.*`).** A token bucket: tokens accrue at the configured rate, up to 1 ms worth. A request takes tokens and may go into debt, and a caller in debt sleeps until the debt is repaid. The small bucket keeps output paced at block granularity rather than in bursts. A test checks that no 25 ms window exceeds its share of the rate plus a few blocks. Time spent waiting is counted.
-- **`CompactRange(begin, end)`.** Flushes, then compacts each level from 0 up to the deepest level holding data in the range into the next one, until no file at that level overlaps the range. It runs on the calling thread, taking the same level reservations as background compactions.
+- **`CompactRange(begin, end)`.** Flushes, then compacts each level from 0 up to `max(1, deepest level holding data in the range)` into the next one, until no file at that level overlaps the range. The minimum of 1 matches LevelDB: data held only in L0 is still compacted, which drops the stale versions a flush keeps. It runs on the calling thread, taking the same level reservations as background compactions.
 - **Errors.** A failed flush or compaction sets a sticky background error. After that, writes fail and background work and file deletion stop. Shutdown abandons an in-progress compaction without recording an error.
 
 ### 11.5 Obsolete files
@@ -588,3 +591,58 @@ It then deletes:
 **Why deletion is safe.** A file leaves the registry only when the last Version holding it is destroyed. A Version that drops a file is installed only after the edit removing the file is durable. So a file is never deleted before the MANIFEST no longer needs it. The deletion itself runs without the mutex: new files always get numbers above every existing file, so nothing on the delete list can become live meanwhile.
 
 **Stale readers.** A reader thread caching an old SuperVersion keeps that SuperVersion's files on disk until it refreshes. The files are deleted by a later cleanup.
+
+## 12. Public API (`include/Talus/`, `src/db/db.cc`, `src/db/db_iter.*`)
+
+`DB` is a thin facade over `DBImpl`, so no internal header appears on the public include path. The public headers are `db.h`, `options.h`, `write_batch.h`, `iterator.h`, `pinnable_value.h` and `status.h`.
+
+### 12.1 Reads
+
+- **`Get(ReadOptions, key, std::string*)`** copies the value.
+- **`Get(ReadOptions, key, PinnableValue*)`** first releases whatever the `PinnableValue` held. It then pins the value without copying:
+  - *Memtable hit:* a reference on the SuperVersion keeps the memtable alive.
+  - *SSTable hit:* the pin holds a block-cache handle, or the owned block if `fill_cache = false` (nothing for an mmap block), plus a table-cache reference. The value stays valid after its block is evicted, its file is compacted away, and its table is closed. Tests check this under ASan.
+- **`ReadOptions::snapshot`** fixes the read sequence. Otherwise reads use the visible sequence, loaded before the SuperVersion as described in §11.3.
+
+### 12.2 Iterators
+
+`NewIterator` loads the read sequence first, then takes a reference on the current SuperVersion under the mutex; the iterator releases it on destruction. It merges (§8.6):
+- the memtable;
+- the immutable memtable;
+- every L0 table;
+- one `LevelIterator` per non-empty deeper level, which walks that level's sorted file list and opens each table only when the scan reaches it.
+
+`DBIter` turns the merged internal entries into the user's view:
+1. It skips entries newer than the read sequence.
+2. For each user key, the first remaining entry is the newest visible version. If it is a deletion, every version of that key is hidden. Otherwise it is yielded.
+3. `Next()` skips the rest of the current key's versions.
+4. `Seek(t)` seeks the internal key `(t, read sequence, type 1)`.
+
+A corrupt key or a child error makes the iterator invalid, and the error is reported through `status()`. Because the iterator holds its SuperVersion, it is a stable snapshot: writes, flushes and compactions after its creation are invisible to it, and do not invalidate it.
+
+### 12.3 Snapshots
+
+`GetSnapshot()` appends a `Snapshot` holding the current visible sequence to a `std::list`, under the mutex. The visible sequence only grows, so the list stays ordered and its front is the oldest snapshot: the "smallest snapshot" that compaction's drop rules use. `ReleaseSnapshot` removes it.
+
+### 12.4 Zero allocation (spec §9)
+
+| Path | Why it does not allocate |
+|---|---|
+| `Put` / `Delete` | Each thread reuses one `WriteBatch` whose `Clear()` keeps its capacity. The group-commit `Writer` lives on the stack. The merge buffer and the WAL write buffer are reused. Memtable nodes come from the arena, which is excluded from the count. |
+| `Write(batch)` | The same, with the caller's batch. |
+| `Get` into a `PinnableValue`, memtable or block-cache hit | `LookupKey` and `BlockIter` keys use inline buffers. The per-thread slot is found without locking. Cache lookups make no allocation, and `Pin` stores its cleanups inline. |
+
+**Measured** with a probe that replaces global `operator new`. After warm-up, each path made **0 allocations over 100,000 operations**: `Put`, `Write` with a reused 2-op batch, memtable-hit `Get`, and block-cache-hit `Get` with 99,965 hits and 0 misses. The SuperVersion stayed on the fast path for the whole run. Phase 8 turns this into a permanent test binary.
+
+### 12.5 Statistics
+
+`DBStats` (spec §10) sums each thread's slot (§11.3) with the background counters. Every hot-path counter is per thread:
+- **Reads:** Gets, tables consulted, bloom checks and "definitely absent" answers, block-cache hits and misses, SuperVersion fast and slow paths.
+- **Writes:** user bytes, WAL bytes, write groups, and a group-size histogram.
+
+The group-commit leader counts groups and WAL bytes on its own thread through `GroupCommitter::Hooks::on_logged`.
+
+Derived ratios:
+- **write amplification** = (WAL + flush + compaction bytes) / user bytes;
+- **read amplification** = tables consulted / Gets;
+- **space amplification** = SST bytes / the deepest non-empty level's bytes.

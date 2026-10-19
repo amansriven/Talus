@@ -48,6 +48,17 @@ struct Options {
   int write_spin_iterations = 256;       // Group-commit spin before blocking (§5).
 };
 
+class Snapshot;
+
+struct ReadOptions {
+  // Read the state as of this snapshot (from DB::GetSnapshot()); null reads
+  // the latest committed state.
+  const Snapshot* snapshot = nullptr;
+  // Insert blocks read from disk into the block cache. Turn off for large
+  // one-time scans, so they do not evict the working set.
+  bool fill_cache = true;
+};
+
 struct WriteOptions {
   // If true, the write is durable (its WAL record fsynced) before Write()
   // returns. If false, a process crash cannot lose it, but a machine crash

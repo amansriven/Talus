@@ -14,6 +14,11 @@ It has two goals, and they're equally important:
 1. **Never lose your data.** Crash it, corrupt it, `SIGKILL` it 10,000 times. Every acknowledged write must survive.
 2. **Go fast, and prove it.** Lock-free data structures, zero-allocation hot paths, cache-line-aware layouts, and tail-latency claims backed by hardware performance counters.
 
+> 🚧 **Status:** Phases 0–7 of 10 are done ([roadmap](docs/PHASES.md)). The engine works end to end:
+> crash-safe writes with group commit, a lock-free read path, SSTables with cache-line-blocked bloom
+> filters, leveled compaction, snapshots, iterators and zero-copy reads. Next up: the full
+> verification gauntlet (Phase 8), then benchmarks against LevelDB and RocksDB.
+
 ---
 
 ## 🧭 What's an LSM-tree, in one minute?
@@ -67,17 +72,18 @@ keeps hot data in memory, so most reads never touch the disk.
 | **Thread-local SuperVersion** | The `Get` fast path takes **zero mutexes**, just one atomic generation check |
 | **Cache-line-blocked bloom filter** | Every probe stays inside one 64-byte cache line, so there's at most one cache miss |
 | **Hardware CRC32C** | SSE4.2 on x86, ARMv8 CRC on ARM, with a slicing-by-8 software fallback chosen at runtime |
-| **Zero-allocation hot paths** | `Get` (with `PinnableValue`) and `Put` never call `malloc` in steady state, and a test enforces it |
+| **Zero-allocation hot paths** | `Put`, `Write`, and `Get` into a `PinnableValue` (memtable or block-cache hit) measured at **0 heap allocations per 100K ops** |
 | **Per-thread stats** | Counters live in padded per-thread slots, so stats don't cause false sharing |
 
 ## 🛡️ How we know it's correct
 
 "It works on my machine" isn't the bar.
 
-- 🎲 **Model-based randomized testing:** 1M+ random operations run against both Talus and a `std::map`, which must agree exactly. Failures save a replay file for deterministic reproduction.
-- 💥 **Crash harness:** a child process writes synced batches, the parent `SIGKILL`s it at a random moment, then reopens the DB and checks that every acknowledged batch is present and none is half-applied.
-- 🧨 **Corruption tests:** flipping bits in WAL, SST and MANIFEST files gives a clean `Corruption` error, never a crash or wrong data.
-- 🐛 **Fuzzing** (libFuzzer) for every on-disk format parser.
+- 🧪 **250+ tests, run under ASan, UBSan and ThreadSanitizer** on every change, including a check of the whole engine against a `std::map` model across flushes, compactions and reopens.
+- 🎲 **Model-based randomized testing:** 1M+ random operations run against both Talus and a `std::map`, which must agree exactly. Failures save a replay file for deterministic reproduction. *(Scaled up in Phase 8.)*
+- 💥 **Crash harness:** a child process writes synced batches, the parent `SIGKILL`s it at a random moment, then reopens the DB and checks that every acknowledged batch is present and none is half-applied. *(Phase 8.)*
+- 🧨 **Corruption tests:** flipping bits in WAL, SST and MANIFEST files gives a clean `Corruption` error, never a crash or wrong data. SSTables already get a byte-flip sweep across the whole file.
+- 🐛 **Fuzzing** (libFuzzer) for every on-disk format parser. *(Phase 8.)*
 - 🧵 **ThreadSanitizer stress tests:** readers, writers, iterators and snapshots run concurrently while compaction runs, with zero data races allowed.
 
 ## 📊 Benchmarks
@@ -111,20 +117,58 @@ ctest --preset debug
 **Platforms:** Linux x86-64 is the primary target (all performance work happens there).
 macOS ARM64 is fully supported for building and testing.
 
+## 🚀 Using it
+
+```cpp
+#include "Talus/db.h"
+
+talus::Options options;
+options.create_if_missing = true;
+std::unique_ptr<talus::DB> db;
+talus::Status s = talus::DB::Open(options, "/tmp/mydb", &db);
+
+s = db->Put({}, "cat", "meow");
+s = db->Put({.sync = true}, "dog", "woof");      // durable before it returns
+
+talus::WriteBatch batch;                         // atomic: all or nothing
+batch.Put("cow", "moo");
+batch.Delete("cat");
+s = db->Write({}, &batch);
+
+std::string value;
+s = db->Get({}, "dog", &value);                  // copies the value
+
+talus::PinnableValue pinned;                     // zero-copy, zero-allocation read
+s = db->Get({}, "cow", &pinned);                 // pinned.value() points into the engine
+
+const talus::Snapshot* snap = db->GetSnapshot(); // a frozen point in time
+auto it = db->NewIterator({.snapshot = snap});
+for (it->SeekToFirst(); it->Valid(); it->Next()) {
+  // it->key(), it->value(): sorted, as of the snapshot
+}
+it.reset();
+db->ReleaseSnapshot(snap);
+```
+
 ## 🗺️ Repo layout
 
 ```
-include/Talus/   public API
-src/util/        coding, CRC32C, hash, arena, Status
-src/…            memtable/, wal/, table/, cache/, version/, db/   (coming soon)
-tests/           unit, model, crash, corruption, stress, allocation tests
-fuzz/            libFuzzer targets
-bench/           db_bench, YCSB, microbenchmarks, plotting scripts
-docs/            DESIGN.md (byte-level formats and concurrency proofs), PERFORMANCE.md
+include/Talus/   public API: DB, Options, WriteBatch, Iterator, PinnableValue, Status
+src/util/        coding, CRC32C, hash, arena, files, rate limiter, huge-page pool
+src/memtable/    lock-free concurrent skiplist + memtable
+src/wal/         write-ahead log reader/writer
+src/table/       blocks, bloom filters, SSTable builder/reader, merging iterator
+src/cache/       sharded LRU block cache, table cache
+src/version/     versions, MANIFEST, compaction picking
+src/db/          the engine: group commit, SuperVersions, flush, compaction, iterators
+tests/unit/      unit + integration tests   (crash, fuzz, stress, allocation: Phase 8)
+fuzz/            libFuzzer targets   (Phase 8)
+bench/           db_bench, YCSB, microbenchmarks, plotting scripts   (Phase 9)
+docs/            DESIGN.md (byte-level formats and concurrency proofs), PHASES.md
 ```
 
 ## 📚 Further reading
 
 - [`docs/DESIGN.md`](docs/DESIGN.md): every file format byte by byte, plus the reasoning behind every memory ordering
-- [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md): the experiments: hypothesis, data, counters, conclusion
+- `docs/PERFORMANCE.md`: the experiments: hypothesis, data, counters, conclusion *(Phase 10)*
 - [`docs/PHASES.md`](docs/PHASES.md): the build plan

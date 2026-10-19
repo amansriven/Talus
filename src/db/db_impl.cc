@@ -1,13 +1,17 @@
 #include "db/db_impl.h"
 
 #include <algorithm>
+#include <bit>
 #include <chrono>
 #include <utility>
 
+#include "db/db_iter.h"
 #include "db/log_replay.h"
+#include "db/write_batch_internal.h"
 #include "table/merging_iterator.h"
 #include "util/filename.h"
 #include "util/port.h"
+#include "wal/log_format.h"
 
 namespace talus {
 namespace {
@@ -192,6 +196,18 @@ Status DBImpl::Recover() {
       }
     }
   }
+  // The WAL named by the MANIFEST's log number always exists: it is created
+  // (and its directory entry synced) before any edit names it, and deleted
+  // only after a later edit names a newer one. If it is missing, a durable
+  // MANIFEST edit was lost, e.g. a damaged final record that reads as a
+  // crash-torn tail. Then the writes it covered are gone from both the WAL
+  // and the MANIFEST, and opening would silently return stale data.
+  const uint64_t log_number = versions_->log_number();
+  if (log_number != 0 &&
+      std::find(logs.begin(), logs.end(), log_number) == logs.end()) {
+    return Status::Corruption(LogFileName(dbname_, log_number),
+                              "WAL named by the MANIFEST is missing (lost MANIFEST edit?)");
+  }
 
   // Replay WALs oldest first, flushing to L0 whenever the memtable fills,
   // and once more at the end.
@@ -243,9 +259,11 @@ Status DBImpl::Recover() {
   }
 
   mem_ = NewMemTable();
+  GroupCommitter::Hooks hooks;
+  hooks.prepare = [this] { return MakeRoomForWrite(); };
+  hooks.on_logged = [this](size_t members, size_t bytes) { RecordWriteGroup(members, bytes); };
   committer_ = std::make_unique<GroupCommitter>(log_.get(), mem_.get(), max_sequence,
-                                                options_.write_spin_iterations,
-                                                [this] { return MakeRoomForWrite(); });
+                                                options_.write_spin_iterations, std::move(hooks));
   InstallSuperVersion();
   DeleteObsoleteFiles(&lock, /*recovering=*/true);
   return Status::OK();
@@ -264,19 +282,33 @@ Status DBImpl::Write(const WriteOptions& options, WriteBatch* batch) {
   if (batch == nullptr) {
     return Status::InvalidArgument("null WriteBatch");
   }
+  per_thread_.Local().Add(Counter::kUserBytesWritten,
+                          batch->ApproximateSize() - WriteBatchInternal::kHeaderSize);
   return committer_->Write(options, batch);
 }
 
+// Put and Delete reuse one batch per thread: Clear() keeps its capacity, so
+// in steady state a single-key write does not allocate (spec §9).
 Status DBImpl::Put(const WriteOptions& options, std::string_view key, std::string_view value) {
-  WriteBatch batch;
+  thread_local WriteBatch batch;
+  batch.Clear();
   batch.Put(key, value);
   return Write(options, &batch);
 }
 
 Status DBImpl::Delete(const WriteOptions& options, std::string_view key) {
-  WriteBatch batch;
+  thread_local WriteBatch batch;
+  batch.Clear();
   batch.Delete(key);
   return Write(options, &batch);
+}
+
+void DBImpl::RecordWriteGroup(size_t members, size_t wal_bytes) {
+  ThreadSlot& slot = per_thread_.Local();
+  slot.Add(Counter::kWriteGroups);
+  slot.Add(Counter::kWalBytesWritten, wal_bytes + log::kHeaderSize);
+  const size_t bucket = std::min<size_t>(static_cast<size_t>(std::bit_width(members)) - 1, 6);
+  slot.Add(static_cast<Counter>(static_cast<size_t>(Counter::kGroupSize1) + bucket));
 }
 
 Status DBImpl::MakeRoomForWrite() {
@@ -405,7 +437,17 @@ void DBImpl::InstallSuperVersion() {
   }
 }
 
-Status DBImpl::Get(const GetOptions& options, std::string_view key, std::string* value) {
+Status DBImpl::Get(const ReadOptions& options, std::string_view key, std::string* value) {
+  return GetImpl(options, key, value, nullptr);
+}
+
+Status DBImpl::Get(const ReadOptions& options, std::string_view key, PinnableValue* value) {
+  value->Reset();  // Release whatever it pinned before.
+  return GetImpl(options, key, nullptr, value);
+}
+
+Status DBImpl::GetImpl(const ReadOptions& options, std::string_view key, std::string* copy,
+                       PinnableValue* pinned) {
   // Load the visible sequence BEFORE checking the SuperVersion generation. A
   // write that went into a newer memtable was published after that
   // memtable's SuperVersion was installed. So if our sequence covers the
@@ -413,53 +455,144 @@ Status DBImpl::Get(const GetOptions& options, std::string_view key, std::string*
   // check, and we take the slow path to the newer SuperVersion. In the
   // other order, a stale SuperVersion could be paired with a sequence that
   // includes writes it does not contain.
-  const SequenceNumber sequence = std::min(options.snapshot, committer_->visible_sequence());
+  const SequenceNumber visible = committer_->visible_sequence();
+  const SequenceNumber sequence =
+      options.snapshot != nullptr ? options.snapshot->sequence() : visible;
   ThreadSlot& slot = per_thread_.Local();
   SuperVersion* sv = AcquireSuperVersion(&slot);
+  slot.Add(Counter::kGets);
 
   const LookupKey lkey(key, sequence);
   std::string_view found;
   Status s;
   if (sv->mem->Get(lkey, &found, &s) || (sv->imm != nullptr && sv->imm->Get(lkey, &found, &s))) {
     if (s.ok()) {
-      value->assign(found);
+      if (copy != nullptr) {
+        copy->assign(found);
+      } else {
+        // The value lives in a memtable: keep it alive through a reference
+        // on the SuperVersion that holds that memtable.
+        sv->Ref();
+        Pin pin;
+        pin.Add([](void* p, void* /*unused*/) { static_cast<SuperVersion*>(p)->Unref(); }, sv,
+                nullptr);
+        pinned->PinTo(found, std::move(pin));
+      }
     }
     return s;
   }
-  int tables_consulted = 0;
-  const TableReadOptions read_options{.fill_cache = options.fill_cache};
-  return sv->version->Get(
-      lkey, table_cache_.get(), read_options,
-      [&](std::string_view v, Pin& /*pin*/) { value->assign(v); }, &tables_consulted);
-}
 
-SequenceNumber DBImpl::AcquireSnapshot() {
-  std::lock_guard<std::mutex> lock(mu_);
-  const SequenceNumber s = committer_->visible_sequence();
-  snapshots_.insert(s);
+  int tables_consulted = 0;
+  TableReadStats table_stats;
+  const TableReadOptions read_options{.fill_cache = options.fill_cache, .stats = &table_stats};
+  s = sv->version->Get(
+      lkey, table_cache_.get(), read_options,
+      [&](std::string_view v, Pin& pin) {
+        if (copy != nullptr) {
+          copy->assign(v);
+        } else {
+          pinned->PinTo(v, std::move(pin));  // Holds the block and its table.
+        }
+      },
+      &tables_consulted);
+  slot.Add(Counter::kTablesConsulted, static_cast<uint64_t>(tables_consulted));
+  slot.Add(Counter::kBloomChecks, table_stats.filter_checks);
+  slot.Add(Counter::kBloomNegatives, table_stats.filter_negatives);
+  slot.Add(Counter::kBlockCacheHits, table_stats.block_cache_hits);
+  slot.Add(Counter::kBlockCacheMisses, table_stats.block_cache_misses);
   return s;
 }
 
-void DBImpl::ReleaseSnapshot(SequenceNumber sequence) {
-  std::lock_guard<std::mutex> lock(mu_);
-  auto it = snapshots_.find(sequence);
-  if (it != snapshots_.end()) {
-    snapshots_.erase(it);
+std::unique_ptr<Iterator> DBImpl::NewIterator(const ReadOptions& options) {
+  // As in GetImpl: the sequence first, then the (at least as new)
+  // SuperVersion.
+  const SequenceNumber visible = committer_->visible_sequence();
+  const SequenceNumber sequence =
+      options.snapshot != nullptr ? options.snapshot->sequence() : visible;
+  SuperVersion* sv = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    sv = super_version_;
+    sv->Ref();  // Released by the iterator.
   }
+  const TableReadOptions read_options{.fill_cache = options.fill_cache};
+  std::vector<std::unique_ptr<InternalIterator>> children;
+  children.push_back(NewMemTableIterator(sv->mem.get()));
+  if (sv->imm != nullptr) {
+    children.push_back(NewMemTableIterator(sv->imm.get()));
+  }
+  const Version& v = *sv->version;
+  for (const FilePtr& f : v.files(0)) {
+    children.push_back(table_cache_->NewIterator(f->number, f->file_size, read_options));
+  }
+  for (int level = 1; level < v.num_levels(); ++level) {
+    if (!v.files(level).empty()) {
+      children.push_back(NewLevelIterator(&v.files(level), table_cache_.get(), read_options));
+    }
+  }
+  return NewDBIterator(std::make_unique<MergingIterator<>>(std::move(children)), sequence, sv);
 }
 
-DBInternalStats DBImpl::GetInternalStats() {
+const Snapshot* DBImpl::GetSnapshot() {
   std::lock_guard<std::mutex> lock(mu_);
-  DBInternalStats stats = stats_;
+  return &snapshots_.emplace_back(Snapshot::PrivateTag{}, committer_->visible_sequence());
+}
+
+void DBImpl::ReleaseSnapshot(const Snapshot* snapshot) {
+  std::lock_guard<std::mutex> lock(mu_);
+  snapshots_.remove_if([snapshot](const Snapshot& s) { return &s == snapshot; });
+}
+
+DBStats DBImpl::GetStats() {
+  std::lock_guard<std::mutex> lock(mu_);
+  DBStats st;
+  st.flushes = stats_.flushes;
+  st.flush_micros = stats_.flush_micros;
+  st.flush_bytes_written = stats_.flush_bytes_written;
+  st.compactions = stats_.compactions;
+  st.compaction_micros = stats_.compaction_micros;
+  st.compaction_bytes_read = stats_.compaction_bytes_read;
+  st.compaction_bytes_written = stats_.compaction_bytes_written;
+  st.rate_limiter_wait_micros = stats_.rate_limiter_wait_micros;
+  st.stall_count = stats_.stall_count;
+  st.stall_micros = stats_.stall_micros;
+
   const auto current = versions_->current();
   for (int level = 0; level < current->num_levels(); ++level) {
-    stats.files_per_level.push_back(static_cast<int>(current->files(level).size()));
-    stats.bytes_per_level.push_back(current->LevelBytes(level));
+    st.files_per_level.push_back(static_cast<int>(current->files(level).size()));
+    st.bytes_per_level.push_back(current->LevelBytes(level));
+    st.sst_bytes += current->LevelBytes(level);
+    if (current->LevelBytes(level) > 0) {
+      st.estimated_live_bytes = current->LevelBytes(level);  // Deepest non-empty wins.
+    }
   }
-  const CounterTotals totals = per_thread_.Sum();
-  stats.super_version_fast_path = totals[static_cast<size_t>(Counter::kSuperVersionFastPath)];
-  stats.super_version_slow_path = totals[static_cast<size_t>(Counter::kSuperVersionSlowPath)];
-  return stats;
+
+  const CounterTotals t = per_thread_.Sum();
+  auto get = [&t](Counter c) { return t[static_cast<size_t>(c)]; };
+  st.super_version_fast_path = get(Counter::kSuperVersionFastPath);
+  st.super_version_slow_path = get(Counter::kSuperVersionSlowPath);
+  st.gets = get(Counter::kGets);
+  st.tables_consulted = get(Counter::kTablesConsulted);
+  st.bloom_checks = get(Counter::kBloomChecks);
+  st.bloom_negatives = get(Counter::kBloomNegatives);
+  st.block_cache_hits = get(Counter::kBlockCacheHits);
+  st.block_cache_misses = get(Counter::kBlockCacheMisses);
+  st.user_bytes_written = get(Counter::kUserBytesWritten);
+  st.wal_bytes_written = get(Counter::kWalBytesWritten);
+  st.write_groups = get(Counter::kWriteGroups);
+  for (size_t i = 0; i < st.group_size_histogram.size(); ++i) {
+    st.group_size_histogram[i] = t[static_cast<size_t>(Counter::kGroupSize1) + i];
+  }
+
+  auto ratio = [](uint64_t num, uint64_t den) {
+    return den == 0 ? 0.0 : static_cast<double>(num) / static_cast<double>(den);
+  };
+  st.write_amplification =
+      ratio(st.wal_bytes_written + st.flush_bytes_written + st.compaction_bytes_written,
+            st.user_bytes_written);
+  st.read_amplification = ratio(st.tables_consulted, st.gets);
+  st.space_amplification = ratio(st.sst_bytes, st.estimated_live_bytes);
+  return st;
 }
 
 // ---- Flush -------------------------------------------------------------------
@@ -603,7 +736,7 @@ Status DBImpl::DoCompactionWork(Compaction* c, std::unique_lock<std::mutex>* loc
   // read. Versions at or below it are visible to every reader, so only the
   // newest of them is needed.
   const SequenceNumber smallest_snapshot =
-      snapshots_.empty() ? committer_->visible_sequence() : *snapshots_.begin();
+      snapshots_.empty() ? committer_->visible_sequence() : snapshots_.front().sequence_;
   lock->unlock();
 
   std::vector<std::unique_ptr<InternalIterator>> children;
@@ -762,11 +895,15 @@ Status DBImpl::CompactRange(std::string_view begin, std::string_view end) {
   const std::string_view* end_ptr = end.empty() ? nullptr : &end;
 
   std::unique_lock<std::mutex> lock(mu_);
-  int max_level = -1;  // The deepest level holding data in the range.
+  // Compact down to the deepest level holding data in the range, and at
+  // least to L1, so data sitting only in L0 is compacted too (as in
+  // LevelDB). L0 keeps every version a flush wrote; this is what drops the
+  // stale ones.
+  int max_level = 1;
   {
     const auto current = versions_->current();
     std::vector<FilePtr> inputs;
-    for (int level = 0; level < current->num_levels(); ++level) {
+    for (int level = 1; level < current->num_levels(); ++level) {
       current->GetOverlappingInputs(level, begin_ptr, end_ptr, &inputs);
       if (!inputs.empty()) {
         max_level = level;

@@ -1,25 +1,35 @@
 {
   "version": 3,
-  "cmakeMinimumRequired": { "major": 3, "minor": 20, "patch": 0 },
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 20,
+    "patch": 0
+  },
   "configurePresets": [
     {
       "name": "base",
       "hidden": true,
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/${presetName}",
-      "cacheVariables": { "CMAKE_EXPORT_COMPILE_COMMANDS": "ON" }
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
     },
     {
       "name": "debug",
       "inherits": "base",
       "displayName": "Debug",
-      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
     },
     {
       "name": "release",
       "inherits": "base",
       "displayName": "Release",
-      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
     },
     {
       "name": "profile",
@@ -48,26 +58,79 @@
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "Talus_SANITIZE": "thread"
       }
+    },
+    {
+      "name": "fuzz",
+      "inherits": "base",
+      "displayName": "libFuzzer targets (set CC/CXX to a clang with libFuzzer)",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "Talus_BUILD_FUZZERS": "ON",
+        "Talus_BUILD_TESTS": "OFF"
+      }
     }
   ],
   "buildPresets": [
-    { "name": "debug", "configurePreset": "debug" },
-    { "name": "release", "configurePreset": "release" },
-    { "name": "profile", "configurePreset": "profile" },
-    { "name": "asan", "configurePreset": "asan" },
-    { "name": "tsan", "configurePreset": "tsan" }
+    {
+      "name": "debug",
+      "configurePreset": "debug"
+    },
+    {
+      "name": "release",
+      "configurePreset": "release"
+    },
+    {
+      "name": "profile",
+      "configurePreset": "profile"
+    },
+    {
+      "name": "asan",
+      "configurePreset": "asan"
+    },
+    {
+      "name": "tsan",
+      "configurePreset": "tsan"
+    },
+    {
+      "name": "fuzz",
+      "configurePreset": "fuzz"
+    }
   ],
   "testPresets": [
     {
       "name": "base",
       "hidden": true,
-      "output": { "outputOnFailure": true },
-      "execution": { "noTestsAction": "error" }
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
     },
-    { "name": "debug", "inherits": "base", "configurePreset": "debug" },
-    { "name": "release", "inherits": "base", "configurePreset": "release" },
-    { "name": "profile", "inherits": "base", "configurePreset": "profile" },
-    { "name": "asan", "inherits": "base", "configurePreset": "asan" },
-    { "name": "tsan", "inherits": "base", "configurePreset": "tsan" }
+    {
+      "name": "debug",
+      "inherits": "base",
+      "configurePreset": "debug"
+    },
+    {
+      "name": "release",
+      "inherits": "base",
+      "configurePreset": "release"
+    },
+    {
+      "name": "profile",
+      "inherits": "base",
+      "configurePreset": "profile"
+    },
+    {
+      "name": "asan",
+      "inherits": "base",
+      "configurePreset": "asan"
+    },
+    {
+      "name": "tsan",
+      "inherits": "base",
+      "configurePreset": "tsan"
+    }
   ]
 }

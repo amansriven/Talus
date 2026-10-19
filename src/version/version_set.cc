@@ -282,6 +282,9 @@ Status VersionSet::Recover() {
   }
 
   const std::string manifest = DescriptorFileName(dbname_, manifest_number);
+  if (!FileExists(manifest)) {
+    return Status::Corruption(manifest, "named by CURRENT but missing");
+  }
   std::unique_ptr<SequentialFile> manifest_file;
   s = SequentialFile::Open(manifest, &manifest_file);
   if (!s.ok()) {

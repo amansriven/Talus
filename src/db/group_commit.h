@@ -38,18 +38,23 @@ class Writer;
 // every later Write() returns it.
 class GroupCommitter {
  public:
-  // Run by each leader before it forms its group, while it holds
-  // leadership, so no other write is in progress. The DB uses it to stall
-  // writers and to switch to a new memtable and WAL (through SetTarget()). A
-  // non-OK result fails the would-be group's writes.
-  using PrepareFn = std::function<Status()>;
+  struct Hooks {
+    // Run by each leader before it forms its group, while it holds
+    // leadership, so no other write is in progress. The DB uses it to stall
+    // writers and to switch to a new memtable and WAL (through SetTarget()).
+    // A non-OK result fails the would-be group's writes.
+    std::function<Status()> prepare;
+    // Run by the leader, on its own thread, after a group's WAL record is
+    // written: the number of members and the record's payload size. The DB
+    // counts these in the leader's per-thread statistics.
+    std::function<void(size_t members, size_t record_bytes)> on_logged;
+  };
 
   // `log` and `mem` must outlive this object, or be replaced through
   // SetTarget() first. `last_sequence` is the newest sequence number already
   // used (e.g. the maximum found by recovery).
   GroupCommitter(log::Writer* log, MemTable* mem, SequenceNumber last_sequence,
-                 int spin_iterations = WriteThread::kDefaultSpinIterations,
-                 PrepareFn prepare = nullptr);
+                 int spin_iterations = WriteThread::kDefaultSpinIterations, Hooks hooks = {});
 
   // Redirects later groups to a new WAL and memtable. Only from PrepareFn:
   // the previous group has finished and the next has not started, so no
@@ -74,12 +79,12 @@ class GroupCommitter {
   }
 
  private:
-  Status WriteToLog(const WriteThread::WriteGroup& group, bool need_sync);
+  Status WriteToLog(const WriteThread::WriteGroup& group, bool need_sync, size_t* record_bytes);
   void FinishParallelWrite(WriteThread::Writer* w);
   void Publish(SequenceNumber seq) { visible_sequence_.store(seq, std::memory_order_release); }
 
   WriteThread write_thread_;
-  const PrepareFn prepare_;
+  const Hooks hooks_;
 
   // Leader-only state, including log_ and mem_. Leadership handoff in
   // WriteThread provides the release/acquire ordering, so no lock is needed.

@@ -1,6 +1,8 @@
 add_library(talus
   cache/table_cache.cc
+  db/db.cc
   db/db_impl.cc
+  db/db_iter.cc
   db/dbformat.cc
   db/group_commit.cc
   db/log_replay.cc

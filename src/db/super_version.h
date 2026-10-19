@@ -35,10 +35,26 @@ struct SuperVersion {
   std::atomic<int> refs_{1};
 };
 
-// Statistics counted per thread. Phase 7's DBStats adds to this list.
+// Statistics counted per thread, summed into DBStats.
 enum class Counter : size_t {
   kSuperVersionFastPath,
   kSuperVersionSlowPath,
+  kGets,
+  kTablesConsulted,
+  kBloomChecks,
+  kBloomNegatives,
+  kBlockCacheHits,
+  kBlockCacheMisses,
+  kUserBytesWritten,
+  kWalBytesWritten,
+  kWriteGroups,
+  kGroupSize1,  // Groups with 1 member; kGroupSize1 + i counts [2^i, 2^(i+1)).
+  kGroupSize2,
+  kGroupSize4,
+  kGroupSize8,
+  kGroupSize16,
+  kGroupSize32,
+  kGroupSize64Plus,
   kNumCounters,
 };
 inline constexpr size_t kNumCounters = static_cast<size_t>(Counter::kNumCounters);
