@@ -79,10 +79,11 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, macos-15]
-    env:
-      MPLCONFIGDIR: ${{ runner.temp }}/matplotlib
-      XDG_CACHE_HOME: ${{ runner.temp }}/cache
     steps:
+      - name: Configure temporary cache directories
+        run: |
+          echo "MPLCONFIGDIR=$RUNNER_TEMP/matplotlib" >> "$GITHUB_ENV"
+          echo "XDG_CACHE_HOME=$RUNNER_TEMP/cache" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
