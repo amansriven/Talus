@@ -53,23 +53,29 @@ same as the GCP VM, which makes the two directly comparable.
 5. **Optional: an external SSD** if you also want the disk-heavy experiments
    (section 6). It will be reformatted.
 
-## 3. Make the Ubuntu USB stick (in Windows)
+## 3. Make the Ubuntu USB stick (in Windows, about 15 minutes)
 
-1. Download **Ubuntu 24.04 LTS Desktop** (the `amd64` ISO) from
+1. Download **Ubuntu 24.04 LTS Desktop** (the `amd64` ISO, about 6 GB) from
    <https://ubuntu.com/download/desktop>.
-2. Write it to the stick with **Rufus** (<https://rufus.ie>): choose the
-   stick and the ISO, partition scheme **GPT**, target **UEFI**, then Start.
-   **balenaEtcher** works too.
+2. Download **Rufus** from <https://rufus.ie>. It runs without installing.
+3. Plug in the stick, open Rufus and set:
+   - **Device:** your USB stick. Check the size, so you don't erase another drive.
+   - **Boot selection:** click SELECT and choose the Ubuntu `.iso`.
+   - **Partition scheme:** GPT.
+   - **Target system:** UEFI.
+4. Click **START**. If Rufus asks between ISO image and DD image mode,
+   choose **ISO**. Wait until the status bar says **READY**.
 
-Secure Boot can stay on; Ubuntu boots with it.
+**balenaEtcher** works too. Secure Boot can stay on; Ubuntu boots with it.
 
 ## 4. Boot into Ubuntu
 
 1. **Plug in the charger.** On battery the CPU throttles, and the script
    refuses to run.
-2. Boot from the stick. The easiest way from Windows: **Settings → System →
-   Recovery → Advanced startup → Restart now → Use a device →** your USB
-   stick. Or press the boot-menu key while the laptop powers on:
+2. Boot from the stick. The easiest way, from inside Windows: **Settings →
+   System → Recovery → Advanced startup → Restart now → Use a device →** your
+   USB stick (often listed as "EFI USB Device"). Or press the boot-menu key
+   repeatedly right after pressing power:
 
    | Brand | Key |
    |---|---|
@@ -81,8 +87,8 @@ Secure Boot can stay on; Ubuntu boots with it.
    | MSI | F11 |
    | Microsoft Surface | Hold Volume Down while pressing power |
 
-3. At the Ubuntu menu choose **Try or Install Ubuntu**, then **Try Ubuntu**.
-   Do **not** click Install.
+3. At the black GRUB menu, choose **Try or Install Ubuntu**. When the
+   installer window opens, choose **Try Ubuntu**. Do **not** click Install.
 4. Connect to Wi-Fi (top-right corner).
 5. **Stop the laptop from sleeping.** A sleeping laptop pauses the run and
    ruins its timings. Open a terminal (Ctrl+Alt+T) and run:
@@ -90,6 +96,10 @@ Secure Boot can stay on; Ubuntu boots with it.
    gsettings set org.gnome.desktop.session idle-delay 0
    gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type 'nothing'
    ```
+
+**Back to Windows afterwards:** copy the results off first (section 7), then
+shut Ubuntu down, unplug the stick and power on. The live session keeps
+nothing.
 
 ## 5. Clone and run (in the Ubuntu terminal)
 
@@ -168,6 +178,9 @@ GCP and M3 results.
 
 | Problem | Fix |
 |---|---|
+| The stick doesn't appear in the boot menu | Re-make it in Rufus with GPT and UEFI, or try another USB port. |
+| "Secure Boot violation" | Ubuntu normally boots with Secure Boot on. If it doesn't, turn Secure Boot off in the BIOS setup (usually F2 or Del at power-on). |
+| The laptop boots straight into Windows | Use the Advanced startup route in section 4; Windows Fast Startup can skip the boot-menu key. |
 | Windows asks for a BitLocker recovery key afterwards | Enter the key from section 2. This happens once. |
 | `linux-tools-<version>` not found during `--install` | Handled: the script falls back to `linux-tools-generic` and uses that `perf` directly. |
 | "perf cannot count cycles" | You are in a VM or WSL, not booted from the USB stick. |
