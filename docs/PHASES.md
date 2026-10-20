@@ -21,7 +21,9 @@ Each phase ends with every test passing under the `debug`, `asan`, `tsan` and
 
 Implementation and macOS ARM64 validation are complete: all-engine workload
 matrix, microbenchmarks, sweeps/plots, seven quick experiment scripts and
-benchmark regression tests pass. Linux x86-64 affinity/PMU acceptance is still
-pending. The CI job and strict host validator are ready; see
+benchmark regression tests pass. On a GCP c4-standard-8 (Linux x86-64,
+STANDARD PMU) all 275 tests and the all-engine smoke matrix pass with CPU
+affinity and core counters (cycles, IPC, L1d and branch misses). LLC-miss
+counters still need an ENHANCED-PMU host (144-vCPU C4 or bare metal). The CI job and strict host validator are ready; see
 [BENCHMARKS.md](BENCHMARKS.md) and [STATUS.md](STATUS.md). Full experiment
 measurements remain Phase 10.

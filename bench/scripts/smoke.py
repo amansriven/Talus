@@ -3,6 +3,8 @@
 
   python3 bench/scripts/smoke.py --build build/compare --engines talus,leveldb,rocksdb
   python3 bench/scripts/smoke.py --build build/compare --require-perf --require-affinity
+  python3 bench/scripts/smoke.py --require-perf --optional-perf=llc_misses  # GCP STANDARD PMU
+  python3 bench/scripts/smoke.py --require-perf --optional-perf=l2_misses   # non-Intel x86-64
 
 Uses temporary databases and writes validation.json plus raw JSON to --out.
 No matplotlib dependency. Exit nonzero on errors, missing samples or bad timing.
@@ -21,7 +23,11 @@ from pathlib import Path
 WORKLOADS = "fillseq,fillrandom,overwrite,readrandom,readmissing,seekrandom,readseq,readwhilewriting"
 
 
-def validate(data: dict, require_perf: bool = False, require_affinity: bool = False) -> None:
+PERF_EVENTS = ("cycles", "instructions", "l1d_misses", "l2_misses", "llc_misses", "branch_misses")
+
+
+def validate(data: dict, require_perf: bool = False, require_affinity: bool = False,
+             optional_perf: frozenset = frozenset()) -> None:
     env = data["environment"]
     assert math.isfinite(env["timer_ns_per_tick"]) and env["timer_ns_per_tick"] > 0, env
     if require_affinity:
@@ -42,7 +48,7 @@ def validate(data: dict, require_perf: bool = False, require_affinity: bool = Fa
             assert h["cdf"], h
             if require_perf:
                 assert r["perf"]["available"], r["perf"]
-                for event in ("cycles_per_op", "instructions_per_op", "ipc", "l1d_misses_per_op", "llc_misses_per_op", "branch_misses_per_op"):
+                for event in ["ipc"] + [f"{e}_per_op" for e in PERF_EVENTS if e not in optional_perf]:
                     assert event in r["perf"] and r["perf"][event] >= 0, r["perf"]
                 assert r["perf"]["cycles_per_op"] > 0 and r["perf"]["instructions_per_op"] > 0
 
@@ -54,8 +60,14 @@ def main() -> None:
     ap.add_argument("--engines", default="talus")
     ap.add_argument("--require-perf", action="store_true")
     ap.add_argument("--require-affinity", action="store_true")
+    ap.add_argument("--optional-perf", default="",
+                    help="comma-separated counters --require-perf may find missing, e.g. llc_misses "
+                         "on VMs whose PMU exposes only core events")
     ap.add_argument("--micro", action="store_true", help="also exercise every Google Benchmark case")
     args = ap.parse_args()
+    optional_perf = frozenset(filter(None, args.optional_perf.split(",")))
+    if not optional_perf <= set(PERF_EVENTS) - {"cycles", "instructions"}:
+        ap.error(f"--optional-perf must name counters from {PERF_EVENTS[2:]}")
     args.out.mkdir(parents=True, exist_ok=True)
     checks = []
 
@@ -67,7 +79,7 @@ def main() -> None:
         if proc.returncode:
             raise RuntimeError(f"{' '.join(cmd)}\n{proc.stderr}")
         data = json.loads(output.read_text())
-        validate(data, args.require_perf, args.require_affinity)
+        validate(data, args.require_perf, args.require_affinity, optional_perf)
         checks.append(name)
         print(f"PASS {name}", flush=True)
         return data
@@ -123,7 +135,8 @@ def main() -> None:
             assert not b.get("error_occurred") or "no hardware CRC32C" in b.get("error_message", ""), b
         checks.append("microbenchmarks")
     (args.out / "validation.json").write_text(json.dumps(dict(checks=checks,
-        require_perf=args.require_perf, require_affinity=args.require_affinity), indent=2) + "\n")
+        require_perf=args.require_perf, require_affinity=args.require_affinity,
+        optional_perf=sorted(optional_perf)), indent=2) + "\n")
     print(f"Passed {len(checks)} benchmark checks", flush=True)
 
 

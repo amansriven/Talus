@@ -90,3 +90,27 @@ claim that the full Linux suite or PMU acceptance has passed.
 
 The temporary TSan VM, boot disk and validation SSH metadata have been removed.
 Final instance, disk and reserved-address inventories are empty.
+
+## Linux x86-64 C4 validation (STANDARD PMU)
+
+On October 19, 2026 a c4-standard-8 VM (Intel Xeon Platinum 8581C, Emerald
+Rapids, Ubuntu 24.04, GCC, CMake 3.28) built Talus with LevelDB and RocksDB
+and ran:
+
+- the full CTest suite: 275/275 pass, including the 1M-operation model test,
+  crash harness and benchmark regression tests;
+- `smoke.py --require-perf --optional-perf=llc_misses --require-affinity
+  --micro` over all three engines: 84 checks pass, plus 29 checks restricted
+  to a single CPU with `taskset`.
+
+Cycles, instructions, IPC, L1d misses and branch misses are measured per
+operation. LLC misses are not available: GCP's STANDARD PMU exposes core
+events only, and the ENHANCED PMU (L3 events) requires a 144- or 288-vCPU C4,
+which exceeds this project's 12-vCPU quota. Full PMU acceptance therefore
+still needs a quota increase or another Linux x86-64 host.
+
+The run found and fixed one portability bug: `bench/` relied on `tests/`'s
+`include(GoogleTest)`. Before CMake 3.29 the discovery script path is
+directory-scoped, so the two benchmark test executables registered only
+`*_NOT_BUILT` placeholders. Logs are in the ignored
+`build/phase9-validation/c4-standard/` directory.

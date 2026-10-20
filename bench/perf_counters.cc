@@ -1,6 +1,8 @@
 #include "perf_counters.h"
 
 #include <cstdio>
+#include <fstream>
+#include <string>
 
 #if defined(__linux__)
 #include <linux/perf_event.h>
@@ -24,9 +26,13 @@ void PerfTotals::Add(const PerfTotals& other) {
   }
 }
 
+const char* PerfEventName(int event) {
+  static const char* const kNames[kNumPerfEvents] = {"cycles",    "instructions", "l1d_misses",
+                                                     "l2_misses", "llc_misses",   "branch_misses"};
+  return kNames[event];
+}
+
 std::string PerfTotals::ToJson(uint64_t ops) const {
-  static const char* const kNames[kNumPerfEvents] = {"cycles", "instructions", "l1d_misses",
-                                                     "llc_misses", "branch_misses"};
   bool any = false;
   std::string json = "{";
   char buf[96];
@@ -35,7 +41,7 @@ std::string PerfTotals::ToJson(uint64_t ops) const {
       continue;
     }
     any = true;
-    std::snprintf(buf, sizeof(buf), "\"%s_per_op\":%.3f,", kNames[i],
+    std::snprintf(buf, sizeof(buf), "\"%s_per_op\":%.3f,", PerfEventName(i),
                   ops == 0 ? 0.0 : static_cast<double>(values[i]) / static_cast<double>(ops));
     json += buf;
   }
@@ -70,6 +76,22 @@ constexpr uint64_t CacheEvent(uint64_t cache, uint64_t op, uint64_t result) {
   return cache | (op << 8) | (result << 16);
 }
 
+// Raw event encodings are model-specific. MEM_LOAD_RETIRED.L2_MISS (event
+// 0xD1, umask 0x10) has the same encoding on every Intel family-6 core since
+// Haswell; other vendors get no L2 counter rather than a wrong one.
+bool IsIntelFamily6() {
+  static const bool intel = [] {
+    std::ifstream in("/proc/cpuinfo");
+    bool vendor = false, family = false;
+    for (std::string line; std::getline(in, line) && !(vendor && family);) {
+      if (line.starts_with("vendor_id")) vendor = line.ends_with("GenuineIntel");
+      if (line.starts_with("cpu family")) family = line.ends_with(": 6");
+    }
+    return vendor && family;
+  }();
+  return intel;
+}
+
 }  // namespace
 
 ThreadPerfCounters::ThreadPerfCounters() {
@@ -78,6 +100,7 @@ ThreadPerfCounters::ThreadPerfCounters() {
   fds_[kL1dMisses] = OpenCounter(PERF_TYPE_HW_CACHE,
                                  CacheEvent(PERF_COUNT_HW_CACHE_L1D, PERF_COUNT_HW_CACHE_OP_READ,
                                             PERF_COUNT_HW_CACHE_RESULT_MISS));
+  fds_[kL2Misses] = IsIntelFamily6() ? OpenCounter(PERF_TYPE_RAW, 0x10d1) : -1;
   fds_[kLlcMisses] = OpenCounter(PERF_TYPE_HW_CACHE,
                                  CacheEvent(PERF_COUNT_HW_CACHE_LL, PERF_COUNT_HW_CACHE_OP_READ,
                                             PERF_COUNT_HW_CACHE_RESULT_MISS));

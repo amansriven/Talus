@@ -20,9 +20,12 @@ endforeach()
 
 add_executable(micro_bench micro/micro_bench.cc)
 target_include_directories(micro_bench PRIVATE ${PROJECT_SOURCE_DIR}/src)
-target_link_libraries(micro_bench PRIVATE talus benchmark::benchmark talus_warnings)
+target_link_libraries(micro_bench PRIVATE talus talus_bench_common benchmark::benchmark talus_warnings)
 
 if(Talus_BUILD_TESTS)
+  # Needed here too: before CMake 3.29 the discovery script path is a
+  # directory-scoped variable, so tests/'s include does not reach bench/.
+  include(GoogleTest)
   add_executable(talus_bench_timer_test timer_test.cc)
   target_link_libraries(talus_bench_timer_test PRIVATE talus_warnings GTest::gtest_main)
   gtest_discover_tests(talus_bench_timer_test DISCOVERY_TIMEOUT 60)

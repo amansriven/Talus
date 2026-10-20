@@ -2,11 +2,12 @@
 
 User-authorized project: `talus-512109`.
 
-The user authorized a **USD $5 cumulative maximum** for GCP resources created
-by this agent for Talus. This includes Phase 9 validation and any later runs,
-VMs, disks and associated network charges. It is not $5 per run. Do not increase
-this amount, reset it for another phase, or start another run without accounting
-for prior charges. Unrelated account activity is outside the agent's control.
+The user authorized a **USD $10 cumulative maximum** for GCP resources created
+by this agent for Talus (raised from $5 by the user on October 19, 2026). This
+includes Phase 9 validation and any later runs, VMs, disks and associated
+network charges. It is not $10 per run. Do not increase this amount without the
+user's say-so, reset it for another phase, or start another run without
+accounting for prior charges. Unrelated account activity is outside the agent's control.
 GCP billing budgets/alerts are not hard spending cutoffs.
 
 ## October 19, 2026 attempt
@@ -56,3 +57,24 @@ performance claims. Logs are in `build/tsan-link-validation/`.
 Cleanup verified: the VM and boot disk were deleted, project inventory lists
 no instances/disks/reserved addresses, and validation SSH metadata was removed.
 The final inventory is retained with the run logs.
+
+## October 19, 2026 C4 STANDARD-PMU check
+
+Project quota blocks the enhanced PMU: `CPUS_ALL_REGIONS` is 12 vCPUs and
+`PREEMPTIBLE_CPUS` is 0, while GCP allows the enhanced PMU (the only level with
+LLC/L3 events) only on 144- or 288-vCPU C4 shapes. The user chose a small C4
+with the STANDARD PMU (core events: cycles, instructions, L1d and branch
+misses) instead.
+
+`talus-c4-check`: c4-standard-8 (Intel Emerald Rapids), us-central1-a,
+STANDARD provisioning, `--max-run-duration=45m` with DELETE termination,
+auto-deleted 30 GB Hyperdisk Balanced boot disk, no service account,
+instance-level SSH key only. Listed on-demand compute is roughly $0.40/hour,
+so the maximum lifetime costs about $0.30; reserve **$0.40** of the
+cumulative budget. Together with the $0.10 TSan reservation, $9.50 of the
+$10 limit remains uncommitted.
+
+Result: the VM ran from about 23:59 to 00:16 UTC (~18 minutes, roughly $0.12
+of listed compute) and was deleted manually before its 45-minute limit. Final
+instance, disk and reserved-address inventories are empty. Logs are in the
+ignored `build/phase9-validation/c4-standard/` directory.

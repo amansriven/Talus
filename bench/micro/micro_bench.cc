@@ -8,7 +8,10 @@
 //   Arena/Malloc    bump allocation vs the system allocator, across threads
 //   Counter*        false sharing: per-thread counters, padded vs unpadded
 //
-// Run with --benchmark_format=json for the experiment scripts.
+// Run with --benchmark_format=json for the experiment scripts. On Linux the
+// benchmarks the experiments rely on also report hardware counters per
+// iteration (cycles_per_op, l1d_misses_per_op, ...), counted over the timed
+// loop only.
 
 #include <benchmark/benchmark.h>
 
@@ -24,6 +27,7 @@
 #include "cache/lru_cache.h"
 #include "db/dbformat.h"
 #include "memtable/skiplist.h"
+#include "perf_counters.h"
 #include "table/block.h"
 #include "table/block_builder.h"
 #include "table/filter_policy.h"
@@ -35,6 +39,28 @@
 
 namespace talus {
 namespace {
+
+// Counts hardware events from construction until destruction (put it just
+// before the timed loop) and reports each available one per iteration.
+class PerfScope {
+ public:
+  explicit PerfScope(benchmark::State& state) : state_(state) { counters_.Start(); }
+  ~PerfScope() {
+    const bench::PerfTotals totals = counters_.Stop();
+    for (int i = 0; i < bench::kNumPerfEvents; ++i) {
+      if (totals.available[i]) {
+        state_.counters[std::string(bench::PerfEventName(i)) + "_per_op"] = benchmark::Counter(
+            static_cast<double>(totals.values[i]), benchmark::Counter::kAvgIterations);
+      }
+    }
+  }
+  PerfScope(const PerfScope&) = delete;
+  PerfScope& operator=(const PerfScope&) = delete;
+
+ private:
+  benchmark::State& state_;
+  bench::ThreadPerfCounters counters_;
+};
 
 struct Bytewise {
   int operator()(std::string_view a, std::string_view b) const { return a.compare(b); }
@@ -82,8 +108,16 @@ void BM_SkipListInsert(benchmark::State& state) {
   }
   state.SetItemsProcessed(state.iterations() * 100'000);
 }
-BENCHMARK(BM_SkipListInsert<true>)->Arg(0)->Arg(1)->ArgNames({"concurrent"})->Unit(benchmark::kMillisecond);
-BENCHMARK(BM_SkipListInsert<false>)->Arg(0)->Arg(1)->ArgNames({"concurrent"})->Unit(benchmark::kMillisecond);
+BENCHMARK(BM_SkipListInsert<true>)
+    ->Arg(0)
+    ->Arg(1)
+    ->ArgNames({"concurrent"})
+    ->Unit(benchmark::kMillisecond);
+BENCHMARK(BM_SkipListInsert<false>)
+    ->Arg(0)
+    ->Arg(1)
+    ->ArgNames({"concurrent"})
+    ->Unit(benchmark::kMillisecond);
 
 // Many threads inserting into one skiplist with CAS (the concurrent path's
 // scalability), vs the single-writer path driven by one thread.
@@ -120,9 +154,12 @@ void BM_SkipListLookup(benchmark::State& state) {
   }
   typename SkipList<Bytewise, kPrefetch>::Iterator iter(&list);
   std::mt19937_64 rng(7);
-  for (auto _ : state) {
-    iter.Seek(Key8((rng() % n) * 2));
-    benchmark::DoNotOptimize(iter.Valid());
+  {
+    const PerfScope perf(state);
+    for (auto _ : state) {
+      iter.Seek(Key8((rng() % n) * 2));
+      benchmark::DoNotOptimize(iter.Valid());
+    }
   }
   state.SetItemsProcessed(state.iterations());
 }
@@ -169,8 +206,11 @@ void BM_BloomProbe(benchmark::State& state, FilterType type) {
   std::string filter;
   BuildFilter(type, 10, hashes, &filter);
   std::mt19937_64 rng(1);
-  for (auto _ : state) {
-    benchmark::DoNotOptimize(FilterMayContain(filter, rng()));
+  {
+    const PerfScope perf(state);
+    for (auto _ : state) {
+      benchmark::DoNotOptimize(FilterMayContain(filter, rng()));
+    }
   }
   state.SetItemsProcessed(state.iterations());
 }
@@ -213,7 +253,8 @@ void BM_CacheLookup(benchmark::State& state) {
   if (state.thread_index() == 0) {
     cache = std::make_unique<BlockCache>(64 << 20, 16);
     for (int i = 0; i < kBlocks; ++i) {
-      cache->Release(cache->Insert({1, static_cast<uint64_t>(i) * 4096}, std::make_unique<Block>(), 4096));
+      cache->Release(
+          cache->Insert({1, static_cast<uint64_t>(i) * 4096}, std::make_unique<Block>(), 4096));
     }
   }
   std::mt19937 rng(static_cast<uint32_t>(state.thread_index()));
