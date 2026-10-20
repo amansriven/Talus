@@ -1,6 +1,6 @@
 # Current project status
 
-Updated October 19, 2026.
+Updated October 20, 2026.
 
 Talus is a C++20 embedded ordered key-value engine. The public API lives in
 `include/Talus`; `src/db/db_impl.cc` connects WAL/group commit, memtables,
@@ -10,16 +10,35 @@ snapshots provide MVCC visibility.
 
 ## Roadmap
 
-- Phases 0–7: engine implementation exists end to end.
-- Phase 8: verification harnesses exist. Fresh macOS release run passed all
-  266 tests present at the start of the handoff, including the 1M-operation
-  model test and 100-iteration crash harness. Sanitizer/CI and the 10,000-kill
-  acceptance run require separately retained evidence.
-- Phase 9: benchmark implementation and macOS validation are complete. Linux
-  x86-64/PMU acceptance remains pending access to a host or a CI run. The new
-  benchmark CI job is prepared locally but has not been pushed or executed.
-- Phase 10: full measured experiments, PERFORMANCE.md and headline results
-  remain outstanding. The quick experiments below validate tooling only.
+- Phases 0–10 are complete. See "Phase 10" below and
+  [PERFORMANCE.md](PERFORMANCE.md).
+- Open: LLC-miss counters (need an enhanced-PMU or bare-metal host;
+  [LAPTOP.md](LAPTOP.md)), scaling beyond 4 cores, and narrowing LevelDB's
+  lead on range seeks.
+
+## Phase 10
+
+- **Measurements.** The full suite ran on a GCP c4-standard-8-lssd (4
+  Granite Rapids cores, SMT off, local NVMe, Ubuntu 24.04, GCC 13.3): eight
+  A/B experiments, closed- and open-loop sweeps of Talus, LevelDB 1.23 and
+  RocksDB 9.10 at 1–4 threads, and YCSB A–F, medians of 3 repetitions. Raw
+  results are under the ignored `build/phase10/`; plots and summaries are in
+  `docs/perf/`.
+- **Engine changes from the measurements** (PERFORMANCE.md §3): adaptive
+  spin/yield/block waiting in group commit; tables pinned in each Version's
+  file metadata (including at recovery), so reads skip the table cache;
+  each mmap block's checksum verified once per open table; mmap reads by
+  default; the next WAL created outside the DB mutex; new tables preloaded by
+  the thread that wrote them; mapped tables hold no file descriptor and the
+  table limit respects `RLIMIT_NOFILE`; an optional background-thread nice
+  value. The benchmark comparison now maps tables in all three engines.
+- **Verification.** 278 tests pass in release on macOS and Linux x86-64; the
+  269 engine tests also pass under ASan+UBSan and TSan. The model test's default directory is now unique
+  per process, after two concurrent CTest runs corrupted each other's
+  database. The 10,000-kill crash test passes on Linux x86-64 NVMe with the
+  final code: 652,044 acknowledged batches, all recovered, none torn. Its
+  first Linux run failed at iteration 73 with `Too many open files`, which
+  led to the descriptor fix above; the harness now prints the child's error.
 
 ## Phase 9 work completed
 

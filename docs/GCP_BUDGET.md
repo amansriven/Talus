@@ -88,3 +88,21 @@ database files, `--max-run-duration=3h` with DELETE termination, auto-deleted
 compute plus about $0.04/hour for the 375 GB local SSD, so at most about
 $1.35; reserve **$1.50**. With prior reservations ($0.10 + $0.40), $8.00 of the
 $10 limit remains uncommitted.
+
+Result: `talus-bench` ran about 01:50–04:03 UTC (~2.2 hours, roughly $0.97 at
+the listed rate) in us-east1-b (us-central1 had no c4-standard-8-lssd
+capacity), and was deleted manually. It produced the pre-fix baseline and
+the x86 measurements behind the Phase 10 engine fixes.
+
+## October 20, 2026 final Phase 10 run
+
+`talus-final`: same shape and settings as `talus-bench`, with
+`--max-run-duration=4h`; at most about $1.80, reserve **$1.80**. Cumulative
+reservations: $0.10 + $0.40 + $1.50 (actual ≈ $0.97) + $1.80 ≈ $3.80 of
+the $10 limit.
+
+Result: `talus-final` ran about 04:04–05:58 UTC (~1.9 hours, roughly $0.85)
+and was deleted manually; instance, disk and address inventories are empty.
+Estimated actual spend for all agent-created Talus resources so far: about
+$2.10 of the $10 limit (check the billing console for exact charges, which
+lag).

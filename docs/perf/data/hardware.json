@@ -1,0 +1,18 @@
+{
+  "hostname": "talus-final.us-east1-b.c.talus-512109.internal",
+  "os": "Linux-7.0.0-1014-gcp-x86_64-with-glibc2.39",
+  "kernel": "7.0.0-1014-gcp",
+  "python": "3.12.3",
+  "timestamp": "2026-10-20T04:11:04+0000",
+  "logical_cpus": 4,
+  "cpu_model": "Intel(R) Xeon(R) 6985P-C CPU @ 2.30GHz",
+  "physical_cores": 4,
+  "smt_active": "0",
+  "ram_bytes": 31533408256,
+  "cpu_governor": "schedutil",
+  "cpu_max_khz": "2300000",
+  "transparent_hugepages": "always [madvise] never",
+  "perf_event_paranoid": "1",
+  "disks": "NAME    MODEL          SIZE ROTA TRAN\nloop0                 66.8M    0 \nloop1                353.3M    0 \nloop2                 44.7M    0 \nnvme1n1 nvme_card-pd    30G    0 nvme\nnvme0n1 nvme_card0     375G    0 nvme",
+  "db_filesystem": "Filesystem      Size  Used Avail Use% Mounted on\n/dev/nvme0n1    369G   32K  350G   1% /mnt/ssd"
+}

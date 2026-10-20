@@ -15,7 +15,7 @@ Each phase ends with every test passing under the `debug`, `asan`, `tsan` and
 | 7. DB API | `DB::Open`/`Put`/`Get`/`Write`/iterators/snapshots, `PinnableValue`, `DBStats` with per-thread counters | §2, §9, §10 |
 | 8. Verification | Model-based randomized test with replay, concurrent model test, crash harness, corruption tests, fuzz targets, TSan stress, zero-allocation test | §9, §11 |
 | 9. Benchmarks | Cycle-counter timer, `db_bench`, YCSB, open/closed-loop load, `perf_event_open`, LevelDB/RocksDB adapters, Google Benchmark microbenchmarks, Python sweep scripts | §12 |
-| 10. Experiments and docs | The seven A/B experiments, `PERFORMANCE.md`, complete `DESIGN.md`, README with results | §12, §13, §14 |
+| 10. Experiments and docs | The seven A/B experiments (plus an eighth on writer wait policy), `PERFORMANCE.md`, complete `DESIGN.md`, README with results | §12, §13, §14 |
 
 ## Phase 9 acceptance status
 
@@ -25,5 +25,15 @@ benchmark regression tests pass. On a GCP c4-standard-8 (Linux x86-64,
 STANDARD PMU) all 275 tests and the all-engine smoke matrix pass with CPU
 affinity and core counters (cycles, IPC, L1d and branch misses). LLC-miss
 counters still need an ENHANCED-PMU host (144-vCPU C4 or bare metal). The CI job and strict host validator are ready; see
-[BENCHMARKS.md](BENCHMARKS.md) and [STATUS.md](STATUS.md). Full experiment
-measurements remain Phase 10.
+[BENCHMARKS.md](BENCHMARKS.md) and [STATUS.md](STATUS.md).
+
+## Phase 10 status
+
+Done. On a GCP c4-standard-8-lssd (4 Granite Rapids cores, local NVMe), the
+full suite ran: all eight experiments, closed- and open-loop sweeps against
+LevelDB and RocksDB at 1–4 threads, and YCSB A–F, with medians of 3
+repetitions. Results and write-ups are in [PERFORMANCE.md](PERFORMANCE.md);
+DESIGN.md §0 maps the architecture and concurrency model. The first run
+exposed scaling problems; the seven fixes in PERFORMANCE.md §3 followed, each
+from a profile or counter. Only LLC-miss counters remain open, pending a
+bare-metal run ([LAPTOP.md](LAPTOP.md)).

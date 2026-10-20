@@ -140,6 +140,43 @@ TEST_F(TableCacheTest, PinnedValueOutlivesEvictionAndTableClose) {
   pin.Reset();
 }
 
+// Pinned tables (FileMetaData::table): lookups through them need no cache
+// lookup, values they return outlive the pin's owner and the cache entry,
+// and pinning stops at max_open_files so the open-file bound holds.
+TEST_F(TableCacheTest, PinnedTablesServeLookupsAndRespectMaxOpenFiles) {
+  for (uint64_t f = 1; f <= 3; ++f) {
+    BuildTable(f);
+  }
+  TableCache cache(dir_.path(), {.max_open_files = 2});
+  std::shared_ptr<const PinnedTable> pinned[4];
+  for (uint64_t f = 1; f <= 3; ++f) {
+    ASSERT_TRUE(cache.Preload(f, sizes_[f], &pinned[f]).ok());
+  }
+  ASSERT_NE(pinned[1], nullptr);
+  ASSERT_NE(pinned[2], nullptr);
+  EXPECT_EQ(pinned[3], nullptr);  // Over the limit: reads of file 3 use the cache.
+
+  Pin pin;
+  std::string_view kept;
+  const LookupKey lkey(UserKey(1, 77), kMaxSequenceNumber);
+  ASSERT_TRUE(TableCache::Get(*pinned[1], lkey.internal_key(), {},
+                              [&](std::string_view key, std::string_view value, Pin& p) {
+                                ASSERT_EQ(ExtractUserKey(key), UserKey(1, 77));
+                                kept = value;
+                                pin = std::move(p);
+                              })
+                  .ok());
+  pinned[1].reset();  // The Version drops the file...
+  cache.Evict(1);     // ...and the file is deleted.
+  EXPECT_EQ(kept, ValueFor(1, 77));
+  pin.Reset();
+
+  // Releasing a pin frees its slot.
+  std::shared_ptr<const PinnedTable> again;
+  ASSERT_TRUE(cache.Preload(3, sizes_[3], &again).ok());
+  EXPECT_NE(again, nullptr);
+}
+
 TEST_F(TableCacheTest, MmapReadsBypassTheBlockCache) {
   BuildTable(1);
   BlockCache block_cache(8 << 20, 16);
@@ -182,6 +219,26 @@ TEST_F(TableCacheTest, OpenFilesStayWithinMaxOpenFiles) {
     }
   }
   EXPECT_EQ(OpenFds(), baseline);  // Destroying the cache closes everything.
+}
+
+// A mapped table holds no file descriptor, so pinning thousands of tables
+// cannot exhaust RLIMIT_NOFILE.
+TEST_F(TableCacheTest, MappedTablesHoldNoFileDescriptors) {
+  constexpr uint64_t kTables = 12;
+  for (uint64_t f = 1; f <= kTables; ++f) {
+    BuildTable(f);
+  }
+  const int baseline = OpenFds();
+  TableCache cache(dir_.path(), {.read_mode = RandomAccessFile::Mode::kMmap});
+  std::vector<std::shared_ptr<const PinnedTable>> pinned(kTables + 1);
+  for (uint64_t f = 1; f <= kTables; ++f) {
+    ASSERT_TRUE(cache.Preload(f, sizes_[f], &pinned[f]).ok());
+    ASSERT_NE(pinned[f], nullptr);
+  }
+  EXPECT_EQ(OpenFds(), baseline);
+  for (uint64_t f = 1; f <= kTables; ++f) {
+    EXPECT_EQ(Lookup(cache, f, 42), ValueFor(f, 42));
+  }
 }
 
 TEST_F(TableCacheTest, IteratorKeepsTableOpenAfterEvict) {

@@ -38,6 +38,7 @@ threads (§11.4). No other threads exist.
 | Versions, MANIFEST, snapshots list, background scheduling, `imm_` | DB mutex (`DBImpl::mu_`); MANIFEST writes drop it while syncing, serialized by `manifest_busy_` | §10.4, §11 |
 | Live-file registry | Its own mutex, never held with another lock | §11.5 |
 | Block cache, table cache | One mutex per shard, each on its own cache line | §9.1 |
+| Pinned tables (`FileMetaData::table`) | Immutable once a Version is published; one atomic reference count per table | §9.4 |
 | Huge-page buffer pool | One mutex, taken when a block buffer is allocated (a cache miss) or freed | §9.5 |
 | Per-thread statistics | Single-writer relaxed counters in padded slots; a registry mutex only when threads or DBs appear or exit, and when stats are summed | §11.3 |
 
@@ -399,6 +400,7 @@ filter := bits... | num_probes (1B) | filter_type (1B: 1 = standard, 2 = blocked
 
 - **Open.** `Table::Open` reads and checks the footer (magic, handles), loads the index block, and loads and validates the filter. Both stay in memory for the table's lifetime.
 - **Data blocks.** These are read on demand through `RandomAccessFile`, which uses either `pread` or a read-only `mmap` of the whole file. With `mmap` (the default, `Options::use_mmap_reads`, as in LevelDB on 64-bit hosts), block data is used in place with no copy and no block-cache lookup; the OS page cache does the caching. Experiment 6 measured mmap reads at about 2× the throughput of pread. `pread` through the block cache remains available, and is the better choice when the data set is much larger than RAM or files may be truncated underneath the process (a truncated mapping faults with SIGBUS).
+- **Checksums.** Every block's CRC32C is verified before its contents are used. A pread block is verified on each read from the file, and the block cache then holds verified blocks. A mapped block's bytes never change, so a table opened with mmap keeps the data blocks' offsets (from the index, at open) and an atomic bitmap with one bit per block: a block is verified on its first read and the bit set. Re-hashing every 4 KiB block on every read was 54% of a `seekrandom` operation's time on x86; verifying once per open table doubled seek throughput. A block reached through an offset the index does not list is always verified. Caveat: corruption that appears in a mapped file after its block was verified (for example, a failing disk re-read after page eviction) is not detected; the pread mode re-verifies on every disk read.
 - **`InternalGet(lookup_key, fn)`.** This probes the filter first and returns with no I/O if the filter excludes the user key. Otherwise it seeks the index, reads one data block, seeks within it, and calls `fn(key, value)` on the first entry ≥ `lookup_key` while that block is loaded.
 - **Iterator.** `NewIterator()` is a two-level iterator: an index-block iterator selects data blocks, and a block iterator walks each one.
 - **Errors.** The table iterator and the merging iterator both **stop at the first error** (a failed read or a corrupt block) and report it through `status()`. They never skip ahead, because skipping would silently drop entries.
@@ -458,6 +460,8 @@ The table cache maps a file number to an open `Table`: its file descriptor or ma
 - **Failures.** A failed open is not cached, so a later read retries it.
 - **Concurrent misses.** Two threads that miss the same file at once both open it. The second insert replaces the first, which closes once its last pin is released.
 - **Preloading.** Flush and compaction call `Preload` on every table they write, after syncing it and before any MANIFEST edit names it. That opens and validates the table (footer, index, filter) and leaves it in the cache, so no reader pays for the open, and a table that cannot be read fails the flush or compaction instead of a later `Get`. LevelDB and RocksDB do the same when they verify a new table.
+- **Pinned tables.** A table-cache lookup takes a shard mutex and touches a reference count. With 4 reader threads those cache lines bounce between cores: profiling 4-thread `readmissing` on x86 put 35% of the time in `FindTable` and the mutex. So `Preload` can also return a `PinnedTable` (holding the cache handle), which flush and compaction store in the new file's `FileMetaData::table`, and Open attaches to recovered files (§11.1). `Version::Get` calls the `Table` directly for a pinned file: no lookup, no lock, and on a hit one atomic increment so the returned value can outlive the Version. The pinned table closes when the last `FileMetaData` copy and the last value pin are gone. At most `max_open_files` tables are pinned, so the open-file bound still holds; beyond it, files are read through the cache as before.
+- **File descriptors.** A mapped table closes its descriptor right after `mmap` (the mapping stays valid, and reads never use the descriptor), so pinned mmap tables cost no descriptors. For pread tables, the table limit is clamped to the soft `RLIMIT_NOFILE` minus 64 reserved for WALs, the MANIFEST and the rest of the process, as RocksDB does. The 10,000-kill crash test found the need: before this, 1,000 pinned tables held 1,000 descriptors and exhausted Linux's default limit of 1,024, so creating the next WAL failed. RocksDB keeps table readers in its file metadata for the same reason. Point reads at 4 threads went from 0.9M to 2.6M ops/s (`readrandom`) and 3.8M to 11.4M (`readmissing`).
 - **Iterators.** `NewIterator` wraps the table iterator together with a table pin. `Evict(file_number)` is called once a file is deleted; readers that still pin the table keep it open.
 - **The bound holds.** A test opens 12 tables through a cache with `max_open_files = 3` and checks, by counting `/dev/fd` entries, that the process never has more than 3 extra descriptors open.
 
@@ -552,7 +556,8 @@ Requires the DB mutex; concurrent callers are serialized.
 6. fsync the directory if tables were written.
 7. Create a new WAL, and fsync the directory.
 8. In one `LogAndApply`, add the new L0 files, set the log number to the new WAL (making every replayed WAL obsolete) and record the last sequence. The last sequence is the larger of the MANIFEST's value and the largest sequence replayed.
-9. Install a SuperVersion, delete obsolete files (including stray `.dbtmp` files), and start the background threads.
+9. Pin the recovered tables (§9.4): open each live table, up to `max_open_files`, and swap in an identical Version whose files carry them. No reader or background thread exists yet, so the swap is safe; a table that fails to open stays unpinned and reports its error when read.
+10. Install a SuperVersion, delete obsolete files (including stray `.dbtmp` files), and start the background threads.
 
 **Crash at any step.** A crash during recovery redoes the same work on the next open:
 - the replayed WALs still exist until step 8 is durable;
@@ -605,7 +610,7 @@ Every wait in steps 2, 4 and 5 counts as a stall (`stall_count`, `stall_micros`)
 - L0 files containing the key, newest first;
 - then one binary-searched file per deeper level, skipping tables whose bloom filter rules the key out.
 
-Readers never wait for flush or compaction.
+A file whose `FileMetaData` carries a pinned table is read through it directly; only unpinned files go through the table cache (§9.4). Readers never wait for flush or compaction.
 
 ### 11.4 Background work
 
@@ -659,7 +664,7 @@ It then deletes:
 - **`Get(ReadOptions, key, std::string*)`** copies the value.
 - **`Get(ReadOptions, key, PinnableValue*)`** first releases whatever the `PinnableValue` held. It then pins the value without copying:
   - *Memtable hit:* a reference on the SuperVersion keeps the memtable alive.
-  - *SSTable hit:* the pin holds a block-cache handle, or the owned block if `fill_cache = false` (nothing for an mmap block), plus a table-cache reference. The value stays valid after its block is evicted, its file is compacted away, and its table is closed. Tests check this under ASan.
+  - *SSTable hit:* the pin holds a block-cache handle, or the owned block if `fill_cache = false` (nothing for an mmap block), plus a reference on the table: one atomic increment on a pinned table, or a table-cache reference otherwise. The value stays valid after its block is evicted, its file is compacted away, and its table is closed. Tests check this under ASan.
 - **`ReadOptions::snapshot`** fixes the read sequence. Otherwise reads use the visible sequence, loaded before the SuperVersion as described in §11.3.
 
 ### 12.2 Iterators
@@ -688,7 +693,7 @@ A corrupt key or a child error makes the iterator invalid, and the error is repo
 |---|---|
 | `Put` / `Delete` | Each thread reuses one `WriteBatch` whose `Clear()` keeps its capacity. The group-commit `Writer` lives on the stack. The merge buffer and the WAL write buffer are reused. Memtable nodes come from the arena, which is excluded from the count. |
 | `Write(batch)` | The same, with the caller's batch. |
-| `Get` into a `PinnableValue`, memtable or block-cache hit | `LookupKey` and `BlockIter` keys use inline buffers. The per-thread slot is found without locking. Cache lookups make no allocation, and `Pin` stores its cleanups inline. |
+| `Get` into a `PinnableValue`: memtable hit, block-cache hit (pread), or mmap table (the default) | `LookupKey` and `BlockIter` keys use inline buffers. The per-thread slot is found without locking. Cache lookups make no allocation, a pinned table's reference is an atomic increment, and `Pin` stores its cleanups inline. |
 
 **Measured** with a probe that replaces global `operator new`. After warm-up, each path made **0 allocations over 100,000 operations**: `Put`, `Write` with a reused 2-op batch, memtable-hit `Get`, and block-cache-hit `Get` with 99,965 hits and 0 misses. The SuperVersion stayed on the fast path for the whole run. `talus_alloc_test` (§13) enforces all four paths on every run.
 
@@ -720,4 +725,4 @@ Every binary below runs under CTest in every preset. CI runs debug, ASan+UBSan a
 | TSan stress test | `talus_stress_test` | For `TALUS_STRESS_SECONDS` (default 5), all at once: 3 writers (puts, deletes, batches, occasional sync), 3 point readers (copying and pinned, with and without `fill_cache`), 2 iterator threads (half on snapshots), snapshot churn, manual flushes and range compactions, and `GetStats` while counters change. 2 compaction threads and a 256 KiB block cache keep compactions concurrent and evictions constant. Values embed their keys, so every read is checked. |
 | Allocation test | `talus_alloc_test` | Replaces global `operator new`/`delete` (every overload) with per-thread counting versions, and asserts 0 allocations over 100K operations each for `Put`, `Write` with a reused batch, and pinned `Get` on a memtable hit and on a block-cache hit (the latter also asserting 100K cache hits, 0 misses). It also asserts that 4 reader threads doing 100K Gets each never take the SuperVersion slow path once warmed up. |
 
-**Results, Apple M3.** In debug, every suite passes (265 CTest cases). The 1M-op model test takes about 90 s and 100 crash iterations about 13 s. 60 s of libFuzzer per target ran 15.3M (block), 2.6M (VersionEdit), 227K (WAL) and 168K (SSTable) executions, with no crash, leak or timeout.
+**Results.** All 278 CTest cases pass in release on Linux x86-64 (GCC 13) and macOS ARM64 (Clang); the 269 that the sanitizer presets build (all but the benchmark-tool tests) pass under ASan+UBSan and TSan. The crash harness passes 10,000 iterations on Linux x86-64 (NVMe, 30 minutes, 652,044 acknowledged batches all recovered) and on macOS. **Earlier results, Apple M3.** In debug, every suite passes (265 CTest cases at the time). The 1M-op model test takes about 90 s and 100 crash iterations about 13 s. 60 s of libFuzzer per target ran 15.3M (block), 2.6M (VersionEdit), 227K (WAL) and 168K (SSTable) executions, with no crash, leak or timeout.

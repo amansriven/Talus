@@ -1,0 +1,341 @@
+{
+  "fillseq": {
+    "talus": {
+      "4": {
+        "repetitions": 3,
+        "ops_per_sec": {
+          "median": 100000,
+          "stddev": 0.00119862
+        },
+        "mb_per_sec": {
+          "median": 11.0626,
+          "stddev": 1.32599e-07
+        },
+        "p90_ns": {
+          "median": 2827,
+          "stddev": 54.111
+        },
+        "p50_ns": {
+          "median": 1453,
+          "stddev": 11.7898
+        },
+        "p99_ns": {
+          "median": 2420740.0,
+          "stddev": 10102.5
+        },
+        "p999_ns": {
+          "median": 3201020.0,
+          "stddev": 25932.3
+        },
+        "p9999_ns": {
+          "median": 3768320.0,
+          "stddev": 178810
+        },
+        "max_ns": {
+          "median": 4521980.0,
+          "stddev": 135870
+        }
+      }
+    },
+    "leveldb": {
+      "4": {
+        "repetitions": 3,
+        "ops_per_sec": {
+          "median": 100000,
+          "stddev": 0.00191796
+        },
+        "mb_per_sec": {
+          "median": 11.0626,
+          "stddev": 2.12176e-07
+        },
+        "p90_ns": {
+          "median": 2525,
+          "stddev": 63.8853
+        },
+        "p50_ns": {
+          "median": 1546,
+          "stddev": 2.64575
+        },
+        "p99_ns": {
+          "median": 1930240.0,
+          "stddev": 12803.4
+        },
+        "p999_ns": {
+          "median": 2938880.0,
+          "stddev": 16255.5
+        },
+        "p9999_ns": {
+          "median": 3674110.0,
+          "stddev": 165863
+        },
+        "max_ns": {
+          "median": 4853760.0,
+          "stddev": 1011980.0
+        }
+      }
+    },
+    "rocksdb": {
+      "4": {
+        "repetitions": 3,
+        "ops_per_sec": {
+          "median": 99999.8,
+          "stddev": 2.22798
+        },
+        "mb_per_sec": {
+          "median": 11.0626,
+          "stddev": 0.000246473
+        },
+        "p90_ns": {
+          "median": 3663,
+          "stddev": 39.5137
+        },
+        "p50_ns": {
+          "median": 2183,
+          "stddev": 6.4291
+        },
+        "p99_ns": {
+          "median": 4341760.0,
+          "stddev": 266618
+        },
+        "p999_ns": {
+          "median": 7311360.0,
+          "stddev": 452795
+        },
+        "p9999_ns": {
+          "median": 9314300.0,
+          "stddev": 222897
+        },
+        "max_ns": {
+          "median": 10215400.0,
+          "stddev": 738750
+        }
+      }
+    }
+  },
+  "readrandom": {
+    "talus": {
+      "4": {
+        "repetitions": 3,
+        "ops_per_sec": {
+          "median": 99999.9,
+          "stddev": 0.00192256
+        },
+        "mb_per_sec": {
+          "median": 11.0626,
+          "stddev": 2.12685e-07
+        },
+        "p90_ns": {
+          "median": 2123,
+          "stddev": 17.7764
+        },
+        "p50_ns": {
+          "median": 1569,
+          "stddev": 9.86577
+        },
+        "p99_ns": {
+          "median": 3051,
+          "stddev": 1065.24
+        },
+        "p999_ns": {
+          "median": 7439,
+          "stddev": 39119400.0
+        },
+        "p9999_ns": {
+          "median": 28703,
+          "stddev": 78762200.0
+        },
+        "max_ns": {
+          "median": 4100100.0,
+          "stddev": 81945500.0
+        }
+      }
+    },
+    "leveldb": {
+      "4": {
+        "repetitions": 3,
+        "ops_per_sec": {
+          "median": 99999.9,
+          "stddev": 0.00512646
+        },
+        "mb_per_sec": {
+          "median": 11.0626,
+          "stddev": 5.6712e-07
+        },
+        "p90_ns": {
+          "median": 2445,
+          "stddev": 56.5803
+        },
+        "p50_ns": {
+          "median": 1932,
+          "stddev": 34.5881
+        },
+        "p99_ns": {
+          "median": 3079,
+          "stddev": 90.3401
+        },
+        "p999_ns": {
+          "median": 7931,
+          "stddev": 154.764
+        },
+        "p9999_ns": {
+          "median": 36159,
+          "stddev": 193428
+        },
+        "max_ns": {
+          "median": 5160960.0,
+          "stddev": 2516020.0
+        }
+      }
+    },
+    "rocksdb": {
+      "4": {
+        "repetitions": 3,
+        "ops_per_sec": {
+          "median": 99999.9,
+          "stddev": 0.00678732
+        },
+        "mb_per_sec": {
+          "median": 11.0626,
+          "stddev": 7.50856e-07
+        },
+        "p90_ns": {
+          "median": 2615,
+          "stddev": 9.0185
+        },
+        "p50_ns": {
+          "median": 2183,
+          "stddev": 6.1101
+        },
+        "p99_ns": {
+          "median": 4047,
+          "stddev": 32.3316
+        },
+        "p999_ns": {
+          "median": 9687,
+          "stddev": 188.354
+        },
+        "p9999_ns": {
+          "median": 29967,
+          "stddev": 234289
+        },
+        "max_ns": {
+          "median": 1035780.0,
+          "stddev": 2469090.0
+        }
+      }
+    }
+  },
+  "readwhilewriting": {
+    "talus": {
+      "4": {
+        "repetitions": 3,
+        "ops_per_sec": {
+          "median": 99994.1,
+          "stddev": 3.49986
+        },
+        "mb_per_sec": {
+          "median": 11.062,
+          "stddev": 0.000387176
+        },
+        "p90_ns": {
+          "median": 1354750.0,
+          "stddev": 4096
+        },
+        "p50_ns": {
+          "median": 3483,
+          "stddev": 21.3854
+        },
+        "p99_ns": {
+          "median": 2951170.0,
+          "stddev": 3128.37
+        },
+        "p999_ns": {
+          "median": 4481020.0,
+          "stddev": 62028.8
+        },
+        "p9999_ns": {
+          "median": 6148100.0,
+          "stddev": 366334
+        },
+        "max_ns": {
+          "median": 8163330.0,
+          "stddev": 1127810.0
+        }
+      }
+    },
+    "leveldb": {
+      "4": {
+        "repetitions": 3,
+        "ops_per_sec": {
+          "median": 99999.7,
+          "stddev": 3.53691
+        },
+        "mb_per_sec": {
+          "median": 11.0626,
+          "stddev": 0.000391275
+        },
+        "p90_ns": {
+          "median": 1532930.0,
+          "stddev": 14493.6
+        },
+        "p50_ns": {
+          "median": 6507,
+          "stddev": 64.3739
+        },
+        "p99_ns": {
+          "median": 3022850.0,
+          "stddev": 365993
+        },
+        "p999_ns": {
+          "median": 4485120.0,
+          "stddev": 1048010.0
+        },
+        "p9999_ns": {
+          "median": 5697540.0,
+          "stddev": 1678240.0
+        },
+        "max_ns": {
+          "median": 7036930.0,
+          "stddev": 1770790.0
+        }
+      }
+    },
+    "rocksdb": {
+      "4": {
+        "repetitions": 3,
+        "ops_per_sec": {
+          "median": 99994.4,
+          "stddev": 4.71686
+        },
+        "mb_per_sec": {
+          "median": 11.062,
+          "stddev": 0.000521808
+        },
+        "p90_ns": {
+          "median": 1389570.0,
+          "stddev": 19759
+        },
+        "p50_ns": {
+          "median": 4511,
+          "stddev": 324.064
+        },
+        "p99_ns": {
+          "median": 2996220.0,
+          "stddev": 50346.4
+        },
+        "p999_ns": {
+          "median": 4849660.0,
+          "stddev": 136116
+        },
+        "p9999_ns": {
+          "median": 6983680.0,
+          "stddev": 348192
+        },
+        "max_ns": {
+          "median": 9469950.0,
+          "stddev": 1409060.0
+        }
+      }
+    }
+  }
+}

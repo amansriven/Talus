@@ -1,5 +1,6 @@
 #include "table/table.h"
 
+#include <algorithm>
 #include <cstring>
 #include <memory>
 #include <utility>
@@ -55,6 +56,22 @@ Status Table::Open(const TableOpenOptions& options, std::unique_ptr<RandomAccess
   if (!t->index_block_.well_formed()) {
     return Status::Corruption("malformed sstable index block");
   }
+  if (t->file_->is_mmap()) {
+    BlockIter<> index(t->index_block_);
+    for (index.SeekToFirst(); index.Valid(); index.Next()) {
+      BlockHandle handle;
+      std::string_view value = index.value();
+      if (handle.DecodeFrom(&value)) {
+        t->block_offsets_.push_back(handle.offset);
+      }
+    }
+    // A malformed index fails later, at the read that reaches the bad entry.
+    if (!std::is_sorted(t->block_offsets_.begin(), t->block_offsets_.end())) {
+      t->block_offsets_.clear();  // Then every read verifies.
+    }
+    const size_t words = (t->block_offsets_.size() + 63) / 64;
+    t->verified_blocks_ = std::make_unique<std::atomic<uint64_t>[]>(words);
+  }
 
   if (footer.filter.size > 0) {
     BlockContents filter_contents;
@@ -77,6 +94,24 @@ Status Table::Open(const TableOpenOptions& options, std::unique_ptr<RandomAccess
   }
   *table = std::move(t);
   return Status::OK();
+}
+
+bool Table::NeedsVerification(uint64_t offset, size_t* ordinal) const {
+  const auto it = std::lower_bound(block_offsets_.begin(), block_offsets_.end(), offset);
+  if (it == block_offsets_.end() || *it != offset) {
+    *ordinal = block_offsets_.size();  // Not an indexed block: always verify.
+    return true;
+  }
+  *ordinal = static_cast<size_t>(it - block_offsets_.begin());
+  const uint64_t bit = uint64_t{1} << (*ordinal % 64);
+  return (verified_blocks_[*ordinal / 64].load(std::memory_order_relaxed) & bit) == 0;
+}
+
+void Table::MarkVerified(size_t ordinal) const {
+  if (ordinal < block_offsets_.size()) {
+    verified_blocks_[ordinal / 64].fetch_or(uint64_t{1} << (ordinal % 64),
+                                            std::memory_order_relaxed);
+  }
 }
 
 Status Table::GetDataBlock(std::string_view index_value, const TableReadOptions& options,
@@ -102,9 +137,14 @@ Status Table::GetDataBlock(std::string_view index_value, const TableReadOptions&
   }
 
   BlockContents contents;
-  Status s = ReadBlock(*file_, handle, buffer_pool_, &contents);
+  size_t ordinal = 0;
+  const bool verify = !file_->is_mmap() || NeedsVerification(handle.offset, &ordinal);
+  Status s = ReadBlock(*file_, handle, buffer_pool_, &contents, verify);
   if (!s.ok()) {
     return s;
+  }
+  if (verify && file_->is_mmap()) {
+    MarkVerified(ordinal);
   }
   if (contents.heap == nullptr) {
     // An uncompressed mmap block: used in place, valid while the table lives.

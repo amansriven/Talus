@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <set>
 #include <string>
@@ -13,12 +14,18 @@
 
 namespace talus {
 
+class PinnedTable;
+
 // Metadata for one SSTable.
 struct FileMetaData {
   uint64_t number = 0;
   uint64_t file_size = 0;
   std::string smallest;  // Smallest internal key in the file.
   std::string largest;   // Largest internal key in the file.
+  // The open table, when flush or compaction pinned it (TableCache::Preload);
+  // null for files found at recovery, which go through the table cache. Not
+  // part of the encoding.
+  std::shared_ptr<const PinnedTable> table;
 };
 
 // A change to the set of live files, plus counters. The MANIFEST is a log of

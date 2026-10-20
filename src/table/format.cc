@@ -107,7 +107,7 @@ Status DecompressLZ4(std::string_view payload, HugePageBufferPool* pool, BlockCo
 }  // namespace
 
 Status ReadBlock(const RandomAccessFile& file, const BlockHandle& handle, HugePageBufferPool* pool,
-                 BlockContents* result) {
+                 BlockContents* result, bool verify_checksum) {
   if (handle.offset > file.size() || handle.size > file.size() ||
       handle.size + kBlockTrailerSize > file.size() - handle.offset) {
     return Status::Corruption("block handle beyond end of file");
@@ -127,9 +127,11 @@ Status ReadBlock(const RandomAccessFile& file, const BlockHandle& handle, HugePa
   }
 
   const char* data = contents.data();
-  const uint32_t expected = crc32c::Unmask(DecodeFixed32(data + n + 1));
-  if (crc32c::Value(data, n + 1) != expected) {  // Covers the type byte too.
-    return Status::Corruption("block checksum mismatch");
+  if (verify_checksum) {
+    const uint32_t expected = crc32c::Unmask(DecodeFixed32(data + n + 1));
+    if (crc32c::Value(data, n + 1) != expected) {  // Covers the type byte too.
+      return Status::Corruption("block checksum mismatch");
+    }
   }
   switch (static_cast<CompressionType>(data[n])) {
     case CompressionType::kNone:

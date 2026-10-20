@@ -247,6 +247,10 @@ Status RandomAccessFile::Open(const std::string& path, Mode mode,
       return PosixError(path, errno);
     }
     mapping = static_cast<const char*>(p);
+    // The mapping stays valid after close, and reads never use the fd, so a
+    // mapped table holds no file descriptor: thousands of open tables do not
+    // run into RLIMIT_NOFILE.
+    owned = FileDescriptor();
   }
   *result = std::make_unique<RandomAccessFile>(PrivateTag{}, std::move(owned), path, size, mapping);
   return Status::OK();

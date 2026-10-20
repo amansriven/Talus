@@ -15,6 +15,8 @@
 // The last flag makes the first read at or after op N report a mismatch. It
 // exists to test the failure log and replay path itself.
 
+#include <unistd.h>
+
 #include <array>
 #include <chrono>
 #include <cinttypes>
@@ -339,8 +341,11 @@ int Run(int argc, char** argv) {
   }
 
   if (dir.empty()) {
-    dir =
-        (std::filesystem::temp_directory_path() / ("talus_model_" + std::to_string(seed))).string();
+    // The PID keeps concurrent runs of one seed (e.g. two presets' CTest
+    // suites at once) from sharing, and corrupting, a database directory.
+    dir = (std::filesystem::temp_directory_path() /
+           ("talus_model_" + std::to_string(seed) + "_" + std::to_string(::getpid())))
+              .string();
   }
   std::filesystem::remove_all(dir);
   auto runner = std::make_unique<Runner>(dir);

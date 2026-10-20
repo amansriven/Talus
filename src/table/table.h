@@ -1,9 +1,11 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <memory>
 #include <string_view>
+#include <vector>
 
 #include "Talus/status.h"
 #include "cache/lru_cache.h"
@@ -111,6 +113,20 @@ class Table {
   // blocked bloom filter is exactly one cache line.
   std::unique_ptr<char[]> filter_storage_;
   std::string_view filter_;
+  // mmap tables only: the data blocks' offsets, ascending (from the index),
+  // and one bit per block set once its checksum has been verified. The
+  // mapped bytes never change, so each block is checked on its first read
+  // only, as a pread table checks it once per block-cache load. Without
+  // this, re-hashing 4 KiB blocks on every read was over half of a seek's
+  // time. Relaxed atomics suffice: a set bit says only that some thread
+  // verified the same immutable bytes.
+  std::vector<uint64_t> block_offsets_;
+  std::unique_ptr<std::atomic<uint64_t>[]> verified_blocks_;
+
+  // Whether the block at `offset` still needs its checksum verified, and
+  // marking it verified.
+  bool NeedsVerification(uint64_t offset, size_t* ordinal) const;
+  void MarkVerified(size_t ordinal) const;
 
   friend class TableIterator;
 };

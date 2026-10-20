@@ -14,10 +14,10 @@ It has two goals, and they're equally important:
 1. **Never lose your data.** Crash it, corrupt it, `SIGKILL` it 10,000 times. Every acknowledged write must survive.
 2. **Go fast, and prove it.** Lock-free data structures, zero-allocation hot paths, cache-line-aware layouts, and tail-latency claims backed by hardware performance counters.
 
-> 🚧 **Status:** Phases 0–8 of 10 are done ([roadmap](docs/PHASES.md)). The engine works end to end:
-> crash-safe writes with group commit, a lock-free read path, SSTables with cache-line-blocked bloom
-> filters, leveled compaction, snapshots, iterators and zero-copy reads. It's verified by a
-> 1M-operation model test, a SIGKILL crash harness, corruption sweeps and fuzzing. Phase 9 tools pass local checks across Talus, LevelDB and RocksDB; Linux hardware-counter acceptance remains.
+> ✅ **Status:** All 10 phases are done ([roadmap](docs/PHASES.md)). On a 4-core x86 server, Talus serves
+> **2.36M random reads/s at a p99 of 2.7 µs**, beats LevelDB and RocksDB on all six YCSB workloads under
+> matched settings, and survives 10,000 `SIGKILL`s without losing an acknowledged write.
+> Full results: [PERFORMANCE.md](docs/PERFORMANCE.md).
 
 ---
 
@@ -68,7 +68,10 @@ keeps hot data in memory, so most reads never touch the disk.
 |---|---|
 | **Lock-free concurrent skiplist** | Many writers insert into the memtable at once using CAS, while readers never block |
 | **Concurrent arena allocator** | One relaxed `fetch_add` per allocation; a mutex only when a new 4 KiB block is needed |
-| **Group commit** | 100 threads that each want `fsync` share one `fsync` in total |
+| **Group commit** | Concurrent writers share one `fsync`: 3.0× the durable write throughput at 4 threads |
+| **Adaptive writer waiting** | Waiting writers spin, then yield, then sleep, so handing off the WAL rarely costs a context switch: 4.6× write throughput at 4 threads vs. sleeping right away |
+| **Tables pinned in each Version** | Point reads go straight to the table, with no table-cache lock: reads scale linearly with cores |
+| **mmap reads, checksummed once** | Blocks are read in place from the file mapping, and each block's CRC is verified on its first read only: 2.6× the throughput of `pread` |
 | **Thread-local SuperVersion** | The `Get` fast path takes **zero mutexes**, just one atomic generation check |
 | **Cache-line-blocked bloom filter** | Every probe stays inside one 64-byte cache line, so there's at most one cache miss |
 | **Hardware CRC32C** | SSE4.2 on x86, ARMv8 CRC on ARM, with a slicing-by-8 software fallback chosen at runtime |
@@ -79,7 +82,7 @@ keeps hot data in memory, so most reads never touch the disk.
 
 "It works on my machine" isn't the bar.
 
-- 🧪 **265 tests, run under ASan, UBSan and ThreadSanitizer** on every change.
+- 🧪 **278 tests** pass on Linux x86-64 and macOS ARM64, and the 269 engine tests also run under **ASan, UBSan and ThreadSanitizer**.
 - 🎲 **Model-based randomized testing:** 1M random operations (puts, deletes, batches, scans, snapshots, flushes, compactions, reopens) run against both Talus and a `std::map`, which must agree exactly. Failures save a replay file, and `--replay` reproduces them deterministically.
 - 💥 **Crash harness:** a child process writes synced batches, the parent `SIGKILL`s it at a random moment, then reopens the DB and checks that every acknowledged batch is present and none is half-applied. Kills regularly land mid-flush and mid-compaction.
 - 🧨 **Corruption tests:** flipping or truncating bytes in WAL, SST, MANIFEST and CURRENT files gives a clean `Corruption` error (or a clean WAL tail), never a crash or wrong data.
@@ -89,23 +92,37 @@ keeps hot data in memory, so most reads never touch the disk.
 
 ## 📊 Benchmarks
 
-Phase 9 tools are available. Talus will be benchmarked against **LevelDB and RocksDB**
-with matched settings: closed-loop and open-loop (coordinated-omission-safe) load,
-latencies from p50 to p99.99, and `perf` hardware counters (IPC, cache misses, branch misses).
+Measured against **LevelDB 1.23 and RocksDB 9.10** with matched settings on a 4-core
+Intel Xeon (Granite Rapids) cloud server with local NVMe. Medians of 3 runs, threads pinned
+one per core. RocksDB is matched to the same settings, not tuned for its best numbers.
 
-The write-up will be honest, including where RocksDB wins and why.
+| | Talus | RocksDB | LevelDB |
+|---|---|---|---|
+| Random reads, 4 threads | **2.36M ops/s** · p99 2.7 µs | 1.76M · p99 4.1 µs | 1.12M · p99 19.5 µs |
+| Random writes, 4 threads | **430k ops/s** · p99 22.5 µs | 337k · p99 16.4 µs | 277k · p99 67.6 µs |
+| Reads while writing, 4 threads | **1.10M ops/s** | 889k | 288k |
+| YCSB A / C (Zipfian) | **928k / 2.99M** | 747k / 2.00M | 344k / 1.13M |
+| Random seeks, 4 threads | 935k | 805k | **1.53M** |
+
+Where LevelDB wins (range seeks) and why is in [PERFORMANCE.md](docs/PERFORMANCE.md), along with
+all eight A/B experiments: hypothesis, data, hardware counters and conclusion for each.
+
+![YCSB throughput](docs/perf/ycsb.png)
+![Random-read scaling](docs/perf/sweep_readrandom.png)
 
 ```bash
-./build/release/bench/db_bench --benchmarks=fillseq,readrandom --num=100000 --threads=2 --output=/tmp/talus-closed.json
-./build/release/bench/db_bench --benchmarks=fillseq,readrandom --num=100000 --threads=2 --rate=50000 --output=/tmp/talus-open.json
-./build/release/bench/ycsb --workload=a --records=100000 --operations=100000 --output=/tmp/talus-ycsb.json
+# Build with the comparison engines, then run everything (experiments, sweeps, YCSB):
+cmake -S . -B build/compare -G Ninja -DCMAKE_BUILD_TYPE=Release -DTalus_BENCH_COMPARE=ON
+cmake --build build/compare
+bench/scripts/full_run.sh build/compare results /path/on/nvme 0-3 4
+
+# Or a single workload:
+./build/compare/bench/db_bench --engine=rocksdb --benchmarks=fillseq,readrandom --num=1000000 --threads=4
 ```
 
-For comparison engines, configure with `-DTalus_BENCH_COMPARE=ON` and select
-`--engine=leveldb` or `--engine=rocksdb`. Linux hardware counters require PMU access;
-macOS reports them unavailable. Local smoke runs validate the tools, and are not
-publishable performance results. See [benchmark instructions](docs/BENCHMARKS.md) and [current status](docs/STATUS.md).
-
+Linux hardware counters need PMU access; macOS reports them unavailable. See
+[BENCHMARKS.md](docs/BENCHMARKS.md) for every flag and [LAPTOP.md](docs/LAPTOP.md) to benchmark on
+bare metal from a USB stick.
 
 ---
 
@@ -185,12 +202,13 @@ src/version/     versions, MANIFEST, compaction picking
 src/db/          the engine: group commit, SuperVersions, flush, compaction, iterators
 tests/           unit/, model/ (incl. concurrent), crash/, corruption/, stress/, alloc/
 fuzz/            libFuzzer targets + seed-corpus generator
-bench/           db_bench, YCSB, microbenchmarks, plotting scripts   (Phase 9)
+bench/           db_bench, YCSB, microbenchmarks, experiment and plotting scripts
 docs/            DESIGN.md (byte-level formats and concurrency proofs), PHASES.md
 ```
 
 ## 📚 Further reading
 
 - [`docs/DESIGN.md`](docs/DESIGN.md): every file format byte by byte, plus the reasoning behind every memory ordering
-- `docs/PERFORMANCE.md`: the experiments: hypothesis, data, counters, conclusion *(Phase 10)*
+- [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md): results vs LevelDB and RocksDB, and every experiment's hypothesis, data, counters and conclusion
+- [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) and [`docs/LAPTOP.md`](docs/LAPTOP.md): how to run the benchmarks, including on a bare-metal laptop
 - [`docs/PHASES.md`](docs/PHASES.md): the build plan

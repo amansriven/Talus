@@ -175,6 +175,23 @@ double VersionSet::MaxBytesForLevel(int level) const {
          std::pow(static_cast<double>(options_.level_size_multiplier), level - 1);
 }
 
+void VersionSet::AttachTables(
+    const std::function<std::shared_ptr<const PinnedTable>(const FileMetaData&)>& pin) {
+  auto v = std::make_shared<Version>(*current_);
+  for (auto& level : v->files_) {
+    for (FilePtr& f : level) {
+      if (f->table == nullptr) {
+        FileMetaData meta = *f;
+        meta.table = pin(meta);
+        if (meta.table != nullptr) {
+          f = MakeFile(meta);  // The live-file registry counts duplicates.
+        }
+      }
+    }
+  }
+  current_ = std::move(v);
+}
+
 FilePtr VersionSet::MakeFile(const FileMetaData& meta) {
   return std::make_shared<LiveFileMetaData>(meta, &live_files_);
 }

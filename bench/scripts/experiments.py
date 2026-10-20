@@ -201,25 +201,32 @@ def exp_rate_limiter(c: Ctx) -> None:
     # threads need the rest, and an oversubscribed machine would measure the
     # OS scheduler rather than the limiter.
     readers = max(1, c.max_threads // 2)
-    limits = (0, 4 << 20) if c.quick else (0, 8 << 20, 16 << 20, 32 << 20, 64 << 20)
-    for limit in limits:
-        label = "limiter off" if limit == 0 else f"limit {limit >> 20} MiB/s"
-        data = c.db_bench(exp, f"limit{limit}", benchmarks="fillrandom,readwhilewriting",
-                          rate_limit=limit, threads=readers, num=c.n(2_000_000, 100_000),
-                          rate=c.n(100_000, 20_000), duration=c.n(60, 5), max_background_compactions=2)
+    # (rate limit, background nice): the limiter sweep, plus lowering the
+    # background threads' CPU priority instead of their I/O rate.
+    variants = ((0, 0), (4 << 20, 0)) if c.quick else (
+        (0, 0), (8 << 20, 0), (16 << 20, 0), (32 << 20, 0), (64 << 20, 0), (0, 10))
+    for limit, nice in variants:
+        label = ("limiter off" if limit == 0 else f"limit {limit >> 20} MiB/s") + (
+            f", bg nice {nice}" if nice else "")
+        data = c.db_bench(exp, f"limit{limit}_nice{nice}", benchmarks="fillrandom,readwhilewriting",
+                          rate_limit=limit, bg_nice=nice, threads=readers, num=c.n(2_000_000, 100_000),
+                          rate=c.n(100_000, 20_000), duration=c.n(30, 5), max_background_compactions=2)
         entry = tb.result(data, "readwhilewriting")
         run = tb.median_run(entry)
         series[label] = run["timeseries"]
         wamp[label] = run["stats_series"]
+        st, st0 = run["engine_stats"], run["initial_engine_stats"]
+        writer_mb_s = (st["user_bytes_written"] - st0["user_bytes_written"]) / run["seconds"] / 1e6
         rows.append([label, entry["summary"]["p99_ns"]["median"] / 1e3,
                      entry["summary"]["p999_ns"]["median"] / 1e3, entry["summary"]["p9999_ns"]["median"] / 1e3,
-                     run["engine_stats"]["compactions"], run["engine_stats"]["rate_limiter_wait_micros"] / 1e6])
+                     writer_mb_s, (st["stall_micros"] - st0["stall_micros"]) / 1e6,
+                     st["compactions"] - st0["compactions"], st["rate_limiter_wait_micros"] / 1e6])
     tb.plot_timeseries(series, c.out / exp / "timeseries.png",
                        "readwhilewriting (open loop): read latency over time")
     tb.plot_write_amp(wamp, c.out / exp / "write_amp.png", "Write amplification over time")
-    table(c.out / exp / "summary.md", ["variant", "p99 µs", "p99.9 µs", "p99.99 µs", "compactions",
-                                       "limiter wait s"],
-          rows, "Experiment 5: compaction rate limit sweep (readwhilewriting, open loop, half the cores reading).")
+    table(c.out / exp / "summary.md", ["variant", "p99 µs", "p99.9 µs", "p99.99 µs", "writer MB/s",
+                                       "write stall s", "compactions", "limiter wait s"],
+          rows, "Experiment 5: protecting reads from compaction: rate limits and background CPU priority (readwhilewriting, open loop, half the cores reading).")
 
 
 # ---- 6. pread vs mmap, huge pages ---------------------------------------------------------------

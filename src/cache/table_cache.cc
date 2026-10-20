@@ -1,5 +1,7 @@
 #include "cache/table_cache.h"
 
+#include <sys/resource.h>
+
 #include <algorithm>
 #include <utility>
 
@@ -11,6 +13,24 @@ namespace {
 // Each shard gets capacity / shards, rounded down. With few files, one shard
 // keeps the total from overshooting max_open_files through rounding.
 size_t TableCacheShards(size_t max_open_files) { return max_open_files >= 256 ? 16 : 1; }
+
+// Descriptors left for everything but pread tables: WALs, the MANIFEST, the
+// LOCK file, directory syncs, and the rest of the process.
+constexpr size_t kReservedFds = 64;
+
+// How many tables may be open at once. A pread table holds a descriptor, so
+// the limit is also clamped to the process's soft RLIMIT_NOFILE (as RocksDB
+// does); a mapped table holds none.
+size_t MaxOpenTables(const TableCache::Options& options) {
+  size_t limit = std::max<size_t>(options.max_open_files, 1);
+  rlimit fds{};
+  if (options.read_mode == RandomAccessFile::Mode::kPread &&
+      ::getrlimit(RLIMIT_NOFILE, &fds) == 0 && fds.rlim_cur != RLIM_INFINITY) {
+    const auto soft = static_cast<size_t>(fds.rlim_cur);
+    limit = std::min(limit, soft > kReservedFds + 1 ? soft - kReservedFds : 1);
+  }
+  return limit;
+}
 
 // Keeps a table open (through its cache handle) for an iterator's lifetime.
 class PinnedTableIterator final : public InternalIterator {
@@ -52,8 +72,8 @@ class ErrorIterator final : public InternalIterator {
 TableCache::TableCache(std::string dbname, const Options& options)
     : dbname_(std::move(dbname)),
       options_(options),
-      cache_(std::max<size_t>(options.max_open_files, 1),
-             TableCacheShards(options.max_open_files)) {}
+      max_tables_(MaxOpenTables(options)),
+      cache_(max_tables_, TableCacheShards(max_tables_)) {}
 
 Status TableCache::FindTable(uint64_t file_number, uint64_t file_size, Cache::Handle** handle) {
   if ((*handle = cache_.Lookup(file_number)) != nullptr) {
@@ -96,13 +116,33 @@ std::unique_ptr<InternalIterator> TableCache::NewIterator(uint64_t file_number, 
   return std::make_unique<PinnedTableIterator>(std::move(pin), std::move(iter));
 }
 
-Status TableCache::Preload(uint64_t file_number, uint64_t file_size) {
+Status TableCache::Preload(uint64_t file_number, uint64_t file_size,
+                           std::shared_ptr<const PinnedTable>* pinned) {
   Cache::Handle* handle = nullptr;
   Status s = FindTable(file_number, file_size, &handle);
-  if (s.ok()) {
-    cache_.Release(handle);
+  if (!s.ok()) {
+    return s;
   }
+  if (pinned != nullptr && pinned_tables_.fetch_add(1, std::memory_order_relaxed) < max_tables_) {
+    // The PinnedTable takes over our handle reference.
+    auto* t = new PinnedTable(this, handle, Cache::value(handle));
+    *pinned = std::shared_ptr<const PinnedTable>(t, [](const PinnedTable* p) { p->Unref(); });
+    return s;
+  }
+  if (pinned != nullptr) {
+    pinned_tables_.fetch_sub(1, std::memory_order_relaxed);  // Over the limit.
+  }
+  cache_.Release(handle);
   return s;
+}
+
+void PinnedTable::Unref() const {
+  if (refs_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+    TableCache* cache = cache_;
+    cache->cache_.Release(static_cast<TableCache::Cache::Handle*>(handle_));
+    cache->pinned_tables_.fetch_sub(1, std::memory_order_relaxed);
+    delete this;
+  }
 }
 
 void TableCache::Evict(uint64_t file_number) { cache_.Erase(file_number); }

@@ -256,6 +256,14 @@ Status DBImpl::Recover() {
   if (!s.ok()) {
     return s;
   }
+  // Open every recovered table now (up to max_open_files), as RocksDB does,
+  // so reads after a restart skip the table cache too. A table that fails to
+  // open stays unpinned and reports its error when read, as before.
+  versions_->AttachTables([this](const FileMetaData& f) {
+    std::shared_ptr<const PinnedTable> table;
+    (void)table_cache_->Preload(f.number, f.file_size, &table);
+    return table;
+  });
 
   mem_ = NewMemTable();
   GroupCommitter::Hooks hooks;
@@ -647,7 +655,7 @@ Status DBImpl::BuildTable(const MemTable& mem, uint64_t number, FileMetaData* me
   }
   if (s.ok() && builder.NumEntries() > 0) {
     meta->file_size = builder.FileSize();
-    s = table_cache_->Preload(number, meta->file_size);
+    s = table_cache_->Preload(number, meta->file_size, &meta->table);
   }
   if (!s.ok() || builder.NumEntries() == 0) {
     (void)RemoveFile(path);
@@ -811,7 +819,8 @@ Status DBImpl::DoCompactionWork(Compaction* c, std::unique_lock<std::mutex>* loc
       fs = file->Close();
     }
     if (fs.ok()) {
-      fs = table_cache_->Preload(outputs.back().number, outputs.back().file_size);
+      fs = table_cache_->Preload(outputs.back().number, outputs.back().file_size,
+                                 &outputs.back().table);
     }
     builder.reset();
     file.reset();

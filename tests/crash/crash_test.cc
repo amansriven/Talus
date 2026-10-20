@@ -60,7 +60,8 @@ std::string BatchValue(uint64_t batch, int j) {
 
 [[noreturn]] void RunChild(const std::string& dir, uint64_t first_batch, int ack_fd) {
   std::unique_ptr<DB> db;
-  if (!DB::Open(CrashOptions(), dir, &db).ok()) {
+  if (Status s = DB::Open(CrashOptions(), dir, &db); !s.ok()) {
+    std::fprintf(stderr, "child: open failed: %s\n", s.ToString().c_str());
     _exit(3);
   }
   WriteBatch batch;
@@ -70,7 +71,9 @@ std::string BatchValue(uint64_t batch, int j) {
       batch.Put(BatchKey(b, j), BatchValue(b, j));
     }
     batch.Put("last_batch", std::to_string(b));
-    if (!db->Write(WriteOptions{.sync = true}, &batch).ok()) {
+    if (Status s = db->Write(WriteOptions{.sync = true}, &batch); !s.ok()) {
+      std::fprintf(stderr, "child: write of batch %" PRIu64 " failed: %s\n", b,
+                   s.ToString().c_str());
       _exit(4);
     }
     // Durable now: acknowledge it. A partial write to the pipe can only

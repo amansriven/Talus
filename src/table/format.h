@@ -61,12 +61,13 @@ struct BlockContents {
   Buffer heap;
 };
 
-// Reads the block at `handle`, always verifies its checksum, and
-// decompresses it if needed. Buffers come from `pool` if it is non-null.
-// Returns Corruption on a bad checksum, an unknown compression type, or a
-// handle beyond the end of the file.
+// Reads the block at `handle`, verifies its checksum unless the caller
+// already has (`verify_checksum` = false: an mmap block verified on an
+// earlier read), and decompresses it if needed. Buffers come from `pool` if
+// it is non-null. Returns Corruption on a bad checksum, an unknown
+// compression type, or a handle beyond the end of the file.
 Status ReadBlock(const RandomAccessFile& file, const BlockHandle& handle, HugePageBufferPool* pool,
-                 BlockContents* result);
+                 BlockContents* result, bool verify_checksum = true);
 
 // True if this build can write and read blocks compressed with `type`.
 bool CompressionSupported(CompressionType type);

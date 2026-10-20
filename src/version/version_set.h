@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <condition_variable>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -143,6 +144,13 @@ class VersionSet {
   // mid-write) is ignored. Any other damage is Corruption.
   Status Recover();
 
+  // Replaces the current Version with an identical one whose unpinned files
+  // carry the tables `pin` returns (null leaves a file unpinned). For Open
+  // only, before any reader or background thread can hold the Version, so
+  // tables found at recovery get the same lock-free reads as new ones.
+  void AttachTables(
+      const std::function<std::shared_ptr<const PinnedTable>(const FileMetaData&)>& pin);
+
   // Durably applies `edit`, then makes the result current. It fills in the
   // edit's file-number and sequence counters, appends it to the MANIFEST and
   // syncs. The first call after Recover()/CreateNew() starts a fresh
@@ -216,20 +224,24 @@ Status Version::Get(const LookupKey& key, TableCache* table_cache, const TableRe
 
   auto probe = [&](const FileMetaData& f, State* state) {
     ++*tables_consulted;
-    return table_cache->Get(f.number, f.file_size, internal_key, options,
-                            [&](std::string_view found, std::string_view value, Pin& pin) {
-                              ParsedInternalKey parsed;
-                              if (!ParseInternalKey(found, &parsed)) {
-                                *state = State::kCorrupt;
-                              } else if (parsed.user_key == user_key) {
-                                if (parsed.type == ValueType::kValue) {
-                                  *state = State::kFound;
-                                  fn(value, pin);
-                                } else {
-                                  *state = State::kDeleted;
-                                }
-                              }
-                            });
+    auto on_entry = [&](std::string_view found, std::string_view value, Pin& pin) {
+      ParsedInternalKey parsed;
+      if (!ParseInternalKey(found, &parsed)) {
+        *state = State::kCorrupt;
+      } else if (parsed.user_key == user_key) {
+        if (parsed.type == ValueType::kValue) {
+          *state = State::kFound;
+          fn(value, pin);
+        } else {
+          *state = State::kDeleted;
+        }
+      }
+    };
+    // A pinned table skips the table cache's lookup and shard mutex.
+    if (f.table != nullptr) {
+      return TableCache::Get(*f.table, internal_key, options, on_entry);
+    }
+    return table_cache->Get(f.number, f.file_size, internal_key, options, on_entry);
   };
   auto finish = [](State state) {
     switch (state) {
