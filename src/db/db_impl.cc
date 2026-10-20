@@ -261,11 +261,10 @@ Status DBImpl::Recover() {
   GroupCommitter::Hooks hooks;
   hooks.prepare = [this] { return MakeRoomForWrite(); };
   hooks.on_logged = [this](size_t members, size_t bytes) { RecordWriteGroup(members, bytes); };
-  committer_ = std::make_unique<GroupCommitter>(log_.get(), mem_.get(), max_sequence,
-                                                options_.write_spin_iterations, std::move(hooks),
-                                                options_.enable_group_commit
-                                                    ? WriteThread::kMaxGroupBytes
-                                                    : 0);
+  committer_ = std::make_unique<GroupCommitter>(
+      log_.get(), mem_.get(), max_sequence,
+      WriteThread::WaitOptions{options_.write_spin_iterations, options_.write_max_yield_micros},
+      std::move(hooks), options_.enable_group_commit ? WriteThread::kMaxGroupBytes : 0);
   InstallSuperVersion();
   DeleteObsoleteFiles(&lock, /*recovering=*/true);
   return Status::OK();
@@ -357,9 +356,16 @@ Status DBImpl::MakeRoomForWrite() {
 
     // Switch to a new memtable and WAL. The old memtable becomes immutable
     // and the flush thread picks it up.
+    // Create the next WAL without the mutex: its directory fsync can take
+    // milliseconds, and readers refreshing their SuperVersion need the mutex.
+    // Only this leader switches memtables, so nothing it checked above can
+    // be undone meanwhile, and DeleteObsoleteFiles never removes a WAL
+    // numbered above the current one.
     const uint64_t number = versions_->NewFileNumber();
     std::unique_ptr<log::Writer> new_log;
+    lock.unlock();
     Status s = CreateLog(number, &new_log);
+    lock.lock();
     if (!s.ok()) {
       return s;
     }
@@ -462,8 +468,8 @@ Status DBImpl::GetImpl(const ReadOptions& options, std::string_view key, std::st
       options.snapshot != nullptr ? options.snapshot->sequence() : visible;
   ThreadSlot& slot = per_thread_.Local();
   SuperVersion* sv = nullptr;
-  std::unique_ptr<SuperVersion, void (*)(SuperVersion*)> mutex_ref(nullptr,
-                                                                   [](SuperVersion* p) { p->Unref(); });
+  std::unique_ptr<SuperVersion, void (*)(SuperVersion*)> mutex_ref(
+      nullptr, [](SuperVersion* p) { p->Unref(); });
   if (options_.use_thread_local_super_version) {
     sv = AcquireSuperVersion(&slot);
   } else {
@@ -641,7 +647,9 @@ Status DBImpl::BuildTable(const MemTable& mem, uint64_t number, FileMetaData* me
   }
   if (s.ok() && builder.NumEntries() > 0) {
     meta->file_size = builder.FileSize();
-  } else {
+    s = table_cache_->Preload(number, meta->file_size);
+  }
+  if (!s.ok() || builder.NumEntries() == 0) {
     (void)RemoveFile(path);
   }
   return s;
@@ -649,6 +657,7 @@ Status DBImpl::BuildTable(const MemTable& mem, uint64_t number, FileMetaData* me
 
 void DBImpl::FlushThreadMain() {
   PinCurrentThreadToCpus(options_.background_thread_cpus);
+  SetCurrentThreadNice(options_.background_thread_nice);
   std::unique_lock<std::mutex> lock(mu_);
   while (true) {
     bg_cv_.wait(lock, [this] {
@@ -707,6 +716,7 @@ Status DBImpl::FlushImmutable(std::unique_lock<std::mutex>* lock) {
 
 void DBImpl::CompactionThreadMain() {
   PinCurrentThreadToCpus(options_.background_thread_cpus);
+  SetCurrentThreadNice(options_.background_thread_nice);
   std::unique_lock<std::mutex> lock(mu_);
   while (true) {
     std::unique_ptr<Compaction> c;
@@ -799,6 +809,9 @@ Status DBImpl::DoCompactionWork(Compaction* c, std::unique_lock<std::mutex>* loc
     }
     if (fs.ok()) {
       fs = file->Close();
+    }
+    if (fs.ok()) {
+      fs = table_cache_->Preload(outputs.back().number, outputs.back().file_size);
     }
     builder.reset();
     file.reset();

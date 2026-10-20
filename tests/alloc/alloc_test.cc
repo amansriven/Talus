@@ -143,10 +143,15 @@ TEST(AllocationCounterTest, CountsEveryNewOverload) {
 
 class AllocTest : public ::testing::Test {
  protected:
+  // pread through the block cache by default here, so the cache-hit test
+  // exercises the cache; AllocMmapTest covers the default mmap read path.
+  virtual bool UseMmap() const { return false; }
+
   void SetUp() override {
     Options o;
     o.create_if_missing = true;
     o.memtable_size = 256 << 20;  // No memtable switch while measuring.
+    o.use_mmap_reads = UseMmap();
     ASSERT_TRUE(DB::Open(o, dir_.path(), &db_).ok());
     // Precompute keys so building them is not counted.
     for (int i = 0; i < kKeys; ++i) {
@@ -226,6 +231,35 @@ TEST_F(AllocTest, PinnedGetOnABlockCacheHitIsAllocationFree) {
   const DBStats after = db_->GetStats();
   EXPECT_EQ(after.block_cache_misses, before.block_cache_misses);  // Really cache hits.
   EXPECT_EQ(after.block_cache_hits - before.block_cache_hits, static_cast<uint64_t>(kOps));
+}
+
+class AllocMmapTest : public AllocTest {
+ protected:
+  bool UseMmap() const override { return true; }
+};
+
+// The default read path: blocks are used in place from the file mapping.
+TEST_F(AllocMmapTest, PinnedGetOnAnMmapTableIsAllocationFree) {
+  for (int i = 0; i < kKeys; ++i) {
+    ASSERT_TRUE(db_->Put({}, keys_[i], value_).ok());
+  }
+  ASSERT_TRUE(db_->CompactRange("", "").ok());  // All data in SSTables.
+  ASSERT_TRUE(db_->WaitForBackgroundWork().ok());
+  PinnableValue value;
+  for (int i = 0; i < kKeys; ++i) {  // Warm up: thread slot, table cache.
+    ASSERT_TRUE(db_->Get({}, keys_[i], &value).ok());
+  }
+  const DBStats before = db_->GetStats();
+  EXPECT_EQ(AllocationsDuring([&] {
+              for (int i = 0; i < kOps; ++i) {
+                (void)db_->Get({}, keys_[(i * 7919) % kKeys], &value);
+              }
+            }),
+            0);
+  const DBStats after = db_->GetStats();
+  EXPECT_EQ(after.block_cache_hits + after.block_cache_misses,
+            before.block_cache_hits + before.block_cache_misses);  // Really mmap reads.
+  EXPECT_EQ(after.gets - before.gets, static_cast<uint64_t>(kOps));
 }
 
 // Spec §9: no mutex on the Get fast path. Once each reader thread has cached

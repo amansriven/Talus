@@ -1,9 +1,63 @@
 # Talus design
 
 This document describes Talus's on-disk formats, concurrency model and
-invariants precisely enough to write a compatible reader from it alone. It
-grows with each build phase (see [PHASES.md](PHASES.md)); sections for
-components not yet built are absent rather than stubbed.
+invariants precisely enough to write a compatible reader from it alone.
+Section 0 is the map; sections 3–12 give each component's formats and
+ordering arguments; section 13 says how each claim is tested. Measured
+performance lives in [PERFORMANCE.md](PERFORMANCE.md).
+
+## 0. Architecture overview
+
+```
+ user threads ──Put/Write──▶ WriteThread queue (lock-free) ──leader──▶ WAL append (+ one fsync per group)
+                                                                └──▶ memtable inserts (parallel CAS)
+                                                                └──▶ publish visible sequence (release)
+ user threads ──Get/Iter──▶ thread-local SuperVersion {mem, imm, Version} ──▶ memtable, imm, L0…L6
+                                                                              │ bloom filter, index
+                                                                              ▼
+                                                       table cache ──▶ block cache ──▶ pread / mmap
+ flush thread ──────▶ imm ──▶ L0 table ──▶ LogAndApply(MANIFEST) ──▶ new SuperVersion
+ compaction threads ─▶ pick by score ──▶ k-way merge ──▶ rate limiter ──▶ LogAndApply ──▶ delete obsolete files
+```
+
+**Threads.** User threads do all foreground work: a write's group-commit
+leader runs the WAL append, the fsync and memtable switching for its whole
+group (§7.4, §11.2), and readers never hand work to another thread. The
+engine owns one flush thread and `max_background_compactions` compaction
+threads (§11.4). No other threads exist.
+
+**What protects what.**
+
+| State | Protection | Section |
+|---|---|---|
+| Memtable skiplist links | Lock-free: CAS per level, release publish / acquire traversal | §6.2 |
+| Arena bump pointer | One relaxed `fetch_add`; a mutex only to install a new block | §4.1 |
+| Writer queue | Lock-free push (CAS on `newest_writer_`); per-writer state word with a two-flag wake handshake | §7.4 |
+| Visible sequence | Atomic; published with release after a group's inserts finish | §7.4 |
+| Current SuperVersion | DB mutex to install; readers use a per-thread cached reference validated by an acquire load of the generation | §11.3 |
+| Versions, MANIFEST, snapshots list, background scheduling, `imm_` | DB mutex (`DBImpl::mu_`); MANIFEST writes drop it while syncing, serialized by `manifest_busy_` | §10.4, §11 |
+| Live-file registry | Its own mutex, never held with another lock | §11.5 |
+| Block cache, table cache | One mutex per shard, each on its own cache line | §9.1 |
+| Huge-page buffer pool | One mutex, taken when a block buffer is allocated (a cache miss) or freed | §9.5 |
+| Per-thread statistics | Single-writer relaxed counters in padded slots; a registry mutex only when threads or DBs appear or exit, and when stats are summed | §11.3 |
+
+**Lock order.** A cache shard's mutex may be held while the buffer pool's
+mutex is taken, because an evicted block is destroyed inside the shard and
+returns its buffer to the pool; the pool never calls back into a cache. No
+path holds two shard mutexes.
+
+**Blocking I/O under locks.** None. WAL fsyncs (group-commit leader), the
+next WAL's creation and directory sync at a memtable switch (§11.2), table
+writes, syncs and preloads (flush and compaction) and MANIFEST writes and
+syncs all run without the DB mutex; the MANIFEST writer holds only
+`manifest_busy_`. A reader refreshing its SuperVersion therefore never waits
+behind an fsync.
+
+**Lifetimes.** Everything a reader can touch is reference-counted:
+SuperVersions keep memtables and Versions alive, Versions keep table files
+on disk, and pins keep cache blocks and open tables alive (§9.2, §11.3,
+§11.5). Nothing is freed while a reader can still reach it, so readers need
+no epochs or hazard pointers.
 
 ## 1. Decisions where the spec was ambiguous
 
@@ -255,9 +309,9 @@ A simple `store(); notify_one()` would be unsafe here. A waiter that sees the ne
 
 So `notify_one()` never runs on a destroyed object. The tests run every group-commit scenario with `spin_iterations = 0` as well, which forces every wait through this blocking path.
 
-**Spin threshold.** The default is 256 polls, roughly 1–10 µs depending on the CPU's PAUSE/YIELD latency. That is about the time of one group's `write(2)` plus its memtable inserts. Waits that short stay in user space, while waits for an fsync (milliseconds) go to the kernel. This is a starting value, not yet a measurement. Experiment 1 in `PERFORMANCE.md` sweeps it against sync-write throughput and p99, and this paragraph will be updated with the result.
+**Waiting: spin, yield, then block.** A waiting writer polls its state 256 times with `CpuRelax()`, then calls `std::this_thread::yield()` for up to 100 µs, and only then blocks in `atomic::wait` (RocksDB's adaptive wait). The yield phase ends early after 3 yields that each took over 3 µs: another thread needed the core, so the waiter gets out of its way. A group without fsync takes a few microseconds, so almost every wait ends while polling or yielding, with the woken writer already on a CPU; waits for an fsync (milliseconds) still block. The first version blocked after the 256 polls alone. Profiling showed every leadership handoff then paid a futex wake and a context switch, more than the work being waited for, so throughput fell as writer threads were added. Experiment 8 in `PERFORMANCE.md` compares the policies. `Options::write_spin_iterations` and `write_max_yield_micros` set the two budgets.
 
-**Early observation, not a benchmark.** On an Apple M3 with 8 threads writing one-op, 100-byte batches, groups averaged 4 writers, with a maximum of 8. 400 sync writes needed 93–99 fsyncs. Parallel memtable inserts were slower than leader-only inserts for these tiny batches (about 200k vs 320k writes/s), so waking followers seems to cost more than one small insert. Experiment 2 will measure this properly.
+**Where a write's time goes.** Profiling one writer thread on the M3 shows the WAL `write(2)` taking about three times as long as the memtable insert. That syscall is what lets an unsynced write survive a process crash, and LevelDB and RocksDB issue it per write by default too. Group commit amortizes it over the group, so larger groups, not faster inserts, are what make writes scale. Experiment 2 measures parallel vs leader-only inserts.
 
 ## 8. SSTable format (`NNNNNN.sst`, `src/table/`)
 
@@ -344,7 +398,7 @@ filter := bits... | num_probes (1B) | filter_type (1B: 1 = standard, 2 = blocked
 ### 8.5 Reading tables (`table.{h,cc}`)
 
 - **Open.** `Table::Open` reads and checks the footer (magic, handles), loads the index block, and loads and validates the filter. Both stay in memory for the table's lifetime.
-- **Data blocks.** These are read on demand through `RandomAccessFile`, which uses either `pread` or a read-only `mmap` of the whole file. With `mmap`, block data is used in place with no copy. Experiment 6 compares the two modes.
+- **Data blocks.** These are read on demand through `RandomAccessFile`, which uses either `pread` or a read-only `mmap` of the whole file. With `mmap` (the default, `Options::use_mmap_reads`, as in LevelDB on 64-bit hosts), block data is used in place with no copy and no block-cache lookup; the OS page cache does the caching. Experiment 6 measured mmap reads at about 2× the throughput of pread. `pread` through the block cache remains available, and is the better choice when the data set is much larger than RAM or files may be truncated underneath the process (a truncated mapping faults with SIGBUS).
 - **`InternalGet(lookup_key, fn)`.** This probes the filter first and returns with no I/O if the filter excludes the user key. Otherwise it seeks the index, reads one data block, seeks within it, and calls `fn(key, value)` on the first entry ≥ `lookup_key` while that block is loaded.
 - **Iterator.** `NewIterator()` is a two-level iterator: an index-block iterator selects data blocks, and a block iterator walks each one.
 - **Errors.** The table iterator and the merging iterator both **stop at the first error** (a failed read or a corrupt block) and report it through `status()`. They never skip ahead, because skipping would silently drop entries.
@@ -385,7 +439,7 @@ A table-cache lookup hands its callback a pin holding:
 
 So `value` stays valid for as long as the pin does, even after the block is evicted and the table is closed. The phase 7 `PinnableValue` is a `std::string_view` plus such a pin.
 
-**Measured:** after warm-up, 100,000 block-cache-hit lookups with the value pinned and then released made **0 heap allocations**, in both pread and mmap modes. A probe replacing global `operator new` counted them. The phase 8 allocation test makes this a permanent check.
+**Measured:** after warm-up, 100,000 block-cache-hit lookups with the value pinned and then released made **0 heap allocations**, in both pread and mmap modes. A probe replacing global `operator new` counted them. `talus_alloc_test` (§13) now enforces this on every run.
 
 ### 9.3 Block reads through the cache (`table.cc`, `Table::GetDataBlock`)
 
@@ -403,6 +457,7 @@ The table cache maps a file number to an open `Table`: its file descriptor or ma
 - **Misses.** On a miss it opens `NNNNNN.sst` and checks that the file's size equals the size recorded in the manifest, returning `Corruption` if not. Then it parses the table and inserts it.
 - **Failures.** A failed open is not cached, so a later read retries it.
 - **Concurrent misses.** Two threads that miss the same file at once both open it. The second insert replaces the first, which closes once its last pin is released.
+- **Preloading.** Flush and compaction call `Preload` on every table they write, after syncing it and before any MANIFEST edit names it. That opens and validates the table (footer, index, filter) and leaves it in the cache, so no reader pays for the open, and a table that cannot be read fails the flush or compaction instead of a later `Get`. LevelDB and RocksDB do the same when they verify a new table.
 - **Iterators.** `NewIterator` wraps the table iterator together with a table pin. `Evict(file_number)` is called once a file is deleted; readers that still pin the table keep it open.
 - **The bound holds.** A test opens 12 tables through a cache with `max_open_files = 3` and checks, by counting `/dev/fd` entries, that the process never has more than 3 extra descriptors open.
 
@@ -512,7 +567,7 @@ The group-commit leader runs this before forming each group (§7.4), so no write
 4. **Previous flush pending.** If an immutable memtable is still being flushed, wait for it. Only one may be pending.
 5. **Stop.** If L0 has ≥ `l0_stop_trigger` files, wait for compaction.
 6. **Switch.**
-   1. Create the new WAL and fsync the directory.
+   1. Create the new WAL and fsync the directory, with the DB mutex released. The leader is the only thread that switches memtables, so nothing checked above can change meanwhile, and obsolete-file deletion never removes a WAL numbered above the current one. Holding the mutex here made every reader that refreshed its SuperVersion wait for the fsync.
    2. Close the old WAL.
    3. Make the memtable immutable and create a new one.
    4. Point the GroupCommitter at the new WAL and memtable.
@@ -557,7 +612,7 @@ Readers never wait for flush or compaction.
 - **Threads.**
   - A dedicated **flush thread** waits for an immutable memtable. Flush never queues behind compaction, which gives it priority.
   - `max_background_compactions` **compaction threads** each pick the highest-scoring compaction whose input and output levels are not reserved by another running compaction.
-  - All threads are pinned to `background_thread_cpus` on Linux.
+  - All threads are pinned to `background_thread_cpus` on Linux, and run at nice `background_thread_nice` (0 by default; a positive value lets the scheduler preempt compaction for foreground readers when cores are scarce).
 - **Flush.**
   1. Build an L0 table from the immutable memtable: write it, fsync it, close it, then fsync the directory.
   2. `LogAndApply` adds the file and sets the log number to the current WAL, which makes the immutable memtable's WALs obsolete.
@@ -635,7 +690,7 @@ A corrupt key or a child error makes the iterator invalid, and the error is repo
 | `Write(batch)` | The same, with the caller's batch. |
 | `Get` into a `PinnableValue`, memtable or block-cache hit | `LookupKey` and `BlockIter` keys use inline buffers. The per-thread slot is found without locking. Cache lookups make no allocation, and `Pin` stores its cleanups inline. |
 
-**Measured** with a probe that replaces global `operator new`. After warm-up, each path made **0 allocations over 100,000 operations**: `Put`, `Write` with a reused 2-op batch, memtable-hit `Get`, and block-cache-hit `Get` with 99,965 hits and 0 misses. The SuperVersion stayed on the fast path for the whole run. Phase 8 turns this into a permanent test binary.
+**Measured** with a probe that replaces global `operator new`. After warm-up, each path made **0 allocations over 100,000 operations**: `Put`, `Write` with a reused 2-op batch, memtable-hit `Get`, and block-cache-hit `Get` with 99,965 hits and 0 misses. The SuperVersion stayed on the fast path for the whole run. `talus_alloc_test` (§13) enforces all four paths on every run.
 
 ### 12.5 Statistics
 

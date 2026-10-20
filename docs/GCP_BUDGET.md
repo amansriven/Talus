@@ -78,3 +78,13 @@ Result: the VM ran from about 23:59 to 00:16 UTC (~18 minutes, roughly $0.12
 of listed compute) and was deleted manually before its 45-minute limit. Final
 instance, disk and reserved-address inventories are empty. Logs are in the
 ignored `build/phase9-validation/c4-standard/` directory.
+
+## October 19, 2026 Phase 10 benchmark run
+
+`talus-bench`: c4-standard-8-lssd (Emerald Rapids), us-central1-a, SMT off
+(`--threads-per-core=1`, 4 physical cores), STANDARD PMU, local NVMe SSD for
+database files, `--max-run-duration=3h` with DELETE termination, auto-deleted
+30 GB boot disk, no service account. Listed on-demand cost is about $0.40/hour
+compute plus about $0.04/hour for the 375 GB local SSD, so at most about
+$1.35; reserve **$1.50**. With prior reservations ($0.10 + $0.40), $8.00 of the
+$10 limit remains uncommitted.

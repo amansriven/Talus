@@ -107,7 +107,11 @@ is separately configurable with --background_cpus in the C++ tools.
 ## Comparison limits
 
 Memtable size, block size, bloom bits, cache size, open-file limits, compression
-off and sync request flags are passed to all engines. LevelDB fixes its level
+off and sync request flags are passed to all engines. Table reads use mmap in
+every engine by default (`--mmap_reads=1`): LevelDB always maps tables on
+64-bit hosts and cannot be switched to pread, so Talus and RocksDB
+(`allow_mmap_reads`) are matched to it. `--mmap_reads=0` switches Talus and
+RocksDB to pread through their block caches. LevelDB fixes its level
 count, L0 triggers, level sizes, cache sharding and background concurrency in
 its implementation; changing Talus/RocksDB-only knobs does not change those
 LevelDB constants. RocksDB dynamic level sizing is disabled to match the
@@ -122,6 +126,15 @@ fill workloads start fresh each repetition. YCSB's load phase is closed loop;
 the selected arrival rate applies to its run phase. Workload D uses a latest
 key distribution. Concurrent inserts can briefly be selected before their
 write completes, so YCSB reads allow NotFound while still counting I/O errors.
+
+## Bare-metal laptop runs
+
+To get every hardware counter (including LLC misses, which small GCP VMs
+hide), boot any x86-64 laptop from an Ubuntu USB stick and run
+`bench/scripts/laptop_run.sh --install`. It picks performance cores, detects
+supported counters, builds, runs the read-path experiments and packs the
+results. Step-by-step instructions, including Windows-side preparation:
+[LAPTOP.md](LAPTOP.md).
 
 ## Keep cloud use short
 

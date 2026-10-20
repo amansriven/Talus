@@ -472,7 +472,9 @@ TEST_F(DBTest, PinnedTableValueOutlivesEvictionAndCompaction) {
 // ---- Statistics ------------------------------------------------------------------------
 
 TEST_F(DBTest, StatsReportAmplificationAndCounters) {
-  ASSERT_TRUE(Open().ok());
+  Options options = SmallOptions();
+  options.use_mmap_reads = false;  // Reads go through the block cache, whose counters we check.
+  ASSERT_TRUE(Open(options).ok());
   for (int i = 0; i < 20000; ++i) {
     ASSERT_TRUE(db_->Put({}, Key(i % 4000), std::string(150, 'v')).ok());
   }

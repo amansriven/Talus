@@ -69,7 +69,9 @@ std::string EngineConfig::ToJson() const {
     << ",\"concurrent_memtable\":" << concurrent_memtable
     << ",\"tls_super_version\":" << tls_super_version
     << ",\"compaction_rate_limit\":" << compaction_rate_limit
-    << ",\"write_spin_iterations\":" << write_spin_iterations << "}}";
+    << ",\"write_spin_iterations\":" << write_spin_iterations
+    << ",\"write_max_yield_micros\":" << write_max_yield_micros
+    << ",\"background_nice\":" << background_nice << "}}";
   return o.str();
 }
 
@@ -120,7 +122,9 @@ class TalusEngine final : public Engine {
     o.use_thread_local_super_version = c.tls_super_version;
     o.compaction_rate_limit_bytes_per_sec = c.compaction_rate_limit;
     o.write_spin_iterations = c.write_spin_iterations;
+    o.write_max_yield_micros = c.write_max_yield_micros;
     o.background_thread_cpus = c.background_cpus;
+    o.background_thread_nice = c.background_nice;
     return DB::Open(o, c.path, &db_);
   }
 
@@ -315,6 +319,9 @@ class RocksDBEngine final : public Engine {
     o.compression = rocksdb::kNoCompression;
     o.bottommost_compression = rocksdb::kNoCompression;
     o.allow_concurrent_memtable_write = c.concurrent_memtable;
+    // LevelDB always maps tables on 64-bit hosts, so the comparison maps
+    // them in every engine unless --mmap_reads=0.
+    o.allow_mmap_reads = c.mmap_reads;
     o.table_factory.reset(rocksdb::NewBlockBasedTableFactory(table));
     rocksdb::DB* db = nullptr;
     const rocksdb::Status s = rocksdb::DB::Open(o, c.path, &db);

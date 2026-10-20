@@ -171,12 +171,12 @@ def _finish(fig, path: Path, title: str) -> None:
 
 
 def plot_throughput_vs_threads(series: dict[str, list[tuple[int, float]]], path: Path, title: str,
-                               ylabel: str = "ops/s") -> None:
+                               ylabel: str = "ops/s", xlabel: str = "threads") -> None:
     fig, ax = plt.subplots(figsize=(7, 4.5))
     for label, points in series.items():
         points = sorted(points)
         ax.plot([p[0] for p in points], [p[1] for p in points], marker="o", label=label)
-    ax.set_xlabel("threads")
+    ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
     ax.set_xscale("log", base=2)
     ax.grid(alpha=0.3)

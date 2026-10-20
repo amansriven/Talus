@@ -35,6 +35,11 @@ inline void CpuRelax() {
 // required for correctness.
 void PinCurrentThreadToCpus(const std::vector<int>& cpus);
 
+// Gives the calling thread nice value `nice` (Linux: higher is lower
+// priority, so the scheduler preempts it for foreground threads). A no-op on
+// other platforms or for 0.
+void SetCurrentThreadNice(int nice);
+
 }  // namespace talus
 
 #if defined(__GNUC__) || defined(__clang__)

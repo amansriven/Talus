@@ -38,13 +38,15 @@ struct EngineConfig {
 
   // Talus-only knobs for the A/B experiments.
   bool blocked_bloom = true;           // Experiment 4.
-  bool mmap_reads = false;             // Experiment 6.
+  bool mmap_reads = true;              // Experiment 6.
   bool huge_pages = false;             // Experiment 6.
   bool group_commit = true;            // Experiment 1.
   bool concurrent_memtable = true;     // Experiment 2.
   bool tls_super_version = true;       // Experiment 3.
   uint64_t compaction_rate_limit = 0;  // Experiment 5 (bytes/s, 0 = off).
   int write_spin_iterations = 256;
+  int write_max_yield_micros = 100;
+  int background_nice = 0;
   std::vector<int> background_cpus;
 
   std::string ToJson() const;

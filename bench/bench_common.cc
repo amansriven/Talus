@@ -101,7 +101,7 @@ std::string Flags::ToJson() const {
 EngineConfig EngineConfigFromFlags(const Flags& f) {
   EngineConfig c;
   for (const char* name : {"memtable_size", "block_size", "cache_size", "target_file_size",
-                           "l1_max_bytes", "rate_limit", "spin", "bloom_bits"}) {
+                           "l1_max_bytes", "rate_limit", "spin", "yield_us", "bloom_bits"}) {
     if (f.Int(name, 0) < 0) {
       std::fprintf(stderr, "--%s must be nonnegative\n", name);
       std::exit(2);
@@ -119,13 +119,15 @@ EngineConfig EngineConfigFromFlags(const Flags& f) {
   c.l1_max_bytes = static_cast<uint64_t>(f.Int("l1_max_bytes", 10 << 20));
   c.max_background_compactions = static_cast<int>(f.Int("max_background_compactions", 1));
   c.blocked_bloom = f.Bool("blocked_bloom", true);
-  c.mmap_reads = f.Bool("mmap_reads", false);
+  c.mmap_reads = f.Bool("mmap_reads", true);
   c.huge_pages = f.Bool("huge_pages", false);
   c.group_commit = f.Bool("group_commit", true);
   c.concurrent_memtable = f.Bool("concurrent_memtable", true);
   c.tls_super_version = f.Bool("tls_super_version", true);
   c.compaction_rate_limit = static_cast<uint64_t>(f.Int("rate_limit", 0));
   c.write_spin_iterations = static_cast<int>(f.Int("spin", 256));
+  c.write_max_yield_micros = static_cast<int>(f.Int("yield_us", 100));
+  c.background_nice = static_cast<int>(f.Int("bg_nice", 0));
   const std::string cpus = f.Str("background_cpus", "");
   std::stringstream ss(cpus);
   for (std::string cpu; std::getline(ss, cpu, ',');) {

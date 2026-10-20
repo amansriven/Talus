@@ -96,6 +96,15 @@ std::unique_ptr<InternalIterator> TableCache::NewIterator(uint64_t file_number, 
   return std::make_unique<PinnedTableIterator>(std::move(pin), std::move(iter));
 }
 
+Status TableCache::Preload(uint64_t file_number, uint64_t file_size) {
+  Cache::Handle* handle = nullptr;
+  Status s = FindTable(file_number, file_size, &handle);
+  if (s.ok()) {
+    cache_.Release(handle);
+  }
+  return s;
+}
+
 void TableCache::Evict(uint64_t file_number) { cache_.Erase(file_number); }
 
 }  // namespace talus

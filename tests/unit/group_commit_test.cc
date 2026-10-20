@@ -34,16 +34,18 @@ std::string Key(int thread, int i, char part) {
   return "t" + std::to_string(thread) + "_" + std::to_string(i) + "_" + part;
 }
 
-// Parameters: (concurrent memtable writes, spin iterations). Spin 0 forces
-// every wait through the atomic::wait blocking path.
+// Parameters: (concurrent memtable writes, spin iterations). Spin 0 also
+// disables yielding, forcing every wait through the atomic::wait blocking path.
 class GroupCommitTest : public ::testing::TestWithParam<std::tuple<bool, int>> {
  protected:
   GroupCommitTest() {
     std::unique_ptr<WritableFile> file;
     EXPECT_TRUE(WritableFile::Create(log_path_, &file).ok());
     log_ = std::make_unique<log::Writer>(std::move(file));
-    committer_ = std::make_unique<GroupCommitter>(log_.get(), &mem_, /*last_sequence=*/0,
-                                                  std::get<1>(GetParam()));
+    const int spin = std::get<1>(GetParam());
+    committer_ = std::make_unique<GroupCommitter>(
+        log_.get(), &mem_, /*last_sequence=*/0,
+        WriteThread::WaitOptions{.spin_iterations = spin, .max_yield_micros = spin == 0 ? 0 : 100});
   }
 
   // Number of records in the WAL and total operations across them.

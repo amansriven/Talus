@@ -11,10 +11,12 @@ the machine. --quick shrinks every size, for a smoke test, not real numbers.
   1 group_commit         sync-write throughput and p99 vs threads, grouping on/off
   2 concurrent_memtable  write throughput scaling 1..N threads, concurrent vs single-writer
   3 super_version        readrandom scaling and p99.9, thread-local vs mutex acquisition
-  4 bloom                readmissing latency, LLC misses/op, false-positive rate: blocked vs standard
+  4 bloom                readmissing latency, L2/LLC misses/op, false-positive rate: blocked vs standard,
+                         plus per-probe counters from BM_BloomProbe
   5 rate_limiter         readwhilewriting p99.9/p99.99 (open loop) and time series, limiter off vs tuned
   6 mmap_hugepages       readrandom: pread vs mmap, huge pages off vs on
   7 prefetch             skiplist lookup with and without prefetching (microbenchmark)
+  8 wait_policy          supplement to 1-2: spin/yield/block policy vs write throughput and p99
 """
 
 from __future__ import annotations
@@ -64,6 +66,20 @@ def table(path: Path, header: list[str], rows: list[list], intro: str) -> None:
 def perf(run: dict, key: str) -> str:
     p = run.get("perf", {})
     return f"{p[key]:.2f}" if key in p else "n/a"
+
+
+def micro_rows(data: dict) -> list[dict]:
+    """Google Benchmark entries: the medians when there are repetitions, else the single runs."""
+    medians = [b for b in data["benchmarks"] if b.get("aggregate_name") == "median"]
+    return medians or [b for b in data["benchmarks"] if b.get("run_type") != "aggregate"]
+
+
+def micro_perf(b: dict, key: str) -> str:
+    """A PerfScope counter from a micro_bench entry; "ipc" is derived."""
+    if key == "ipc":
+        ok = b.get("cycles_per_op", 0) > 0 and "instructions_per_op" in b
+        return f"{b['instructions_per_op'] / b['cycles_per_op']:.2f}" if ok else "n/a"
+    return f"{b[key]:.2f}" if key in b else "n/a"
 
 
 # ---- 1. Group commit ------------------------------------------------------------------------
@@ -157,13 +173,23 @@ def exp_bloom(c: Ctx) -> None:
         fprs[label] = fpr * 100
         cdfs[label] = run["latency_ns"]["cdf"]
         rows.append([label, entry["summary"]["ops_per_sec"]["median"], entry["summary"]["p50_ns"]["median"] / 1e3,
-                     entry["summary"]["p99_ns"]["median"] / 1e3, perf(run, "llc_misses_per_op"),
-                     perf(run, "l1d_misses_per_op"), f"{fpr * 100:.3f}%"])
+                     entry["summary"]["p99_ns"]["median"] / 1e3, perf(run, "l1d_misses_per_op"),
+                     perf(run, "l2_misses_per_op"), perf(run, "llc_misses_per_op"), f"{fpr * 100:.3f}%"])
     tb.plot_latency_cdf(cdfs, c.out / exp / "latency_cdf.png", "readmissing latency: blocked vs standard bloom")
     tb.plot_bars(fprs, c.out / exp / "fpr.png", "Measured false-positive rate", "%")
-    table(c.out / exp / "summary.md", ["filter", "ops/s", "p50 µs", "p99 µs", "LLC misses/op", "L1d misses/op",
-                                       "false-positive rate"],
+    table(c.out / exp / "summary.md", ["filter", "ops/s", "p50 µs", "p99 µs", "L1d misses/op", "L2 misses/op",
+                                       "LLC misses/op", "false-positive rate"],
           rows, "Experiment 4: cache-line-blocked vs standard bloom filter (readmissing).")
+    # The filter probe alone, without the rest of the read path diluting it.
+    data = tb.run_micro(c.build, c.out / exp / "micro.json", "BM_BloomProbe",
+                        repetitions=1 if c.quick else 5, cpus=c.cpus,
+                        min_time="0.001s" if c.quick else "0.5s")
+    table(c.out / exp / "probe.md", ["filter", "ns/probe", "cycles/probe", "L1d misses/probe",
+                                     "L2 misses/probe", "LLC misses/probe"],
+          [[b["run_name"].split("/")[1], b["real_time"], micro_perf(b, "cycles_per_op"),
+            micro_perf(b, "l1d_misses_per_op"), micro_perf(b, "l2_misses_per_op"),
+            micro_perf(b, "llc_misses_per_op")] for b in micro_rows(data)],
+          "Experiment 4b: one filter probe for an absent key (BM_BloomProbe, 4M keys, 10 bits/key).")
 
 
 # ---- 5. Compaction rate limiter ----------------------------------------------------------------
@@ -171,10 +197,15 @@ def exp_bloom(c: Ctx) -> None:
 def exp_rate_limiter(c: Ctx) -> None:
     exp = "5_rate_limiter"
     rows, series, wamp = [], {}, {}
-    for limit in (0, c.n(16 << 20, 4 << 20)):
+    # Readers get half the cores: the writer, flush and two compaction
+    # threads need the rest, and an oversubscribed machine would measure the
+    # OS scheduler rather than the limiter.
+    readers = max(1, c.max_threads // 2)
+    limits = (0, 4 << 20) if c.quick else (0, 8 << 20, 16 << 20, 32 << 20, 64 << 20)
+    for limit in limits:
         label = "limiter off" if limit == 0 else f"limit {limit >> 20} MiB/s"
         data = c.db_bench(exp, f"limit{limit}", benchmarks="fillrandom,readwhilewriting",
-                          rate_limit=limit, threads=min(4, c.max_threads), num=c.n(2_000_000, 100_000),
+                          rate_limit=limit, threads=readers, num=c.n(2_000_000, 100_000),
                           rate=c.n(100_000, 20_000), duration=c.n(60, 5), max_background_compactions=2)
         entry = tb.result(data, "readwhilewriting")
         run = tb.median_run(entry)
@@ -188,7 +219,7 @@ def exp_rate_limiter(c: Ctx) -> None:
     tb.plot_write_amp(wamp, c.out / exp / "write_amp.png", "Write amplification over time")
     table(c.out / exp / "summary.md", ["variant", "p99 µs", "p99.9 µs", "p99.99 µs", "compactions",
                                        "limiter wait s"],
-          rows, "Experiment 5: compaction rate limiter off vs tuned (readwhilewriting, open loop).")
+          rows, "Experiment 5: compaction rate limit sweep (readwhilewriting, open loop, half the cores reading).")
 
 
 # ---- 6. pread vs mmap, huge pages ---------------------------------------------------------------
@@ -210,10 +241,11 @@ def exp_mmap_hugepages(c: Ctx) -> None:
             run = tb.median_run(entry)
             cdfs[label] = run["latency_ns"]["cdf"]
             rows.append([label, entry["summary"]["ops_per_sec"]["median"], entry["summary"]["p50_ns"]["median"] / 1e3,
-                         entry["summary"]["p99_ns"]["median"] / 1e3, perf(run, "llc_misses_per_op"),
-                         perf(run, "cycles_per_op")])
+                         entry["summary"]["p99_ns"]["median"] / 1e3, perf(run, "l2_misses_per_op"),
+                         perf(run, "llc_misses_per_op"), perf(run, "cycles_per_op")])
     tb.plot_latency_cdf(cdfs, c.out / exp / "latency_cdf.png", "readrandom: pread vs mmap, huge pages")
-    table(c.out / exp / "summary.md", ["variant", "ops/s", "p50 µs", "p99 µs", "LLC misses/op", "cycles/op"],
+    table(c.out / exp / "summary.md", ["variant", "ops/s", "p50 µs", "p99 µs", "L2 misses/op", "LLC misses/op",
+                                       "cycles/op"],
           rows, "Experiment 6: pread vs mmap table reads, huge pages off vs on (readrandom).")
 
 
@@ -225,22 +257,52 @@ def exp_prefetch(c: Ctx) -> None:
                         repetitions=1 if c.quick else 5, cpus=c.cpus,
                         min_time="0.001s" if c.quick else "0.5s")
     rows, bars = [], {}
-    for b in data["benchmarks"]:
-        if b.get("run_type") == "aggregate" and b.get("aggregate_name") != "median":
-            continue
-        prefetch = "<true>" in b["name"]
-        size = b["name"].split("/")[1]
+    for b in micro_rows(data):
+        prefetch = "<true>" in b["run_name"]
+        size = b["run_name"].split("/")[1]
         label = f"{'prefetch' if prefetch else 'no prefetch'}, {int(size):,} keys"
         bars[label] = b["real_time"]
-        rows.append([label, b["real_time"], b.get("items_per_second", 0.0)])
+        rows.append([label, b["real_time"], b.get("items_per_second", 0.0), micro_perf(b, "cycles_per_op"),
+                     micro_perf(b, "ipc"), micro_perf(b, "l1d_misses_per_op"), micro_perf(b, "l2_misses_per_op")])
     tb.plot_bars(bars, c.out / exp / "lookup_ns.png", "Skiplist lookup time", "ns per lookup")
-    table(c.out / exp / "summary.md", ["variant", "ns/lookup", "lookups/s"], rows,
+    table(c.out / exp / "summary.md", ["variant", "ns/lookup", "lookups/s", "cycles/lookup", "IPC",
+                                       "L1d misses/lookup", "L2 misses/lookup"], rows,
           "Experiment 7: prefetching on vs off in skiplist search (BM_SkipListLookup).")
+
+
+# ---- 8. Group-commit wait policy (supplement to 1 and 2) -------------------------------------------
+
+def exp_spin(c: Ctx) -> None:
+    exp = "8_wait_policy"
+    rows, tput = [], {}
+    # (spin polls, yield µs): block almost at once, the old spin-then-block,
+    # a long spin, and the adaptive spin-yield-block default.
+    policies = ((0, 0), (256, 0)) if c.quick else ((0, 0), (256, 0), (4096, 0), (256, 100))
+    for sync in (False, True):
+        for spin, yield_us in policies:
+            label = f"{'sync' if sync else 'no sync'}, spin {spin}, yield {yield_us} µs"
+            for t in c.threads():
+                data = c.db_bench(exp, f"sync{int(sync)}_spin{spin}_yield{yield_us}_t{t}", benchmarks="fillrandom",
+                                  sync=sync, spin=spin, yield_us=yield_us, threads=t,
+                                  num=c.n(200_000 if sync else 2_000_000, 128) * t, duration=c.n(15, 3))
+                entry = tb.result(data, "fillrandom")
+                run = tb.median_run(entry)
+                groups = run["engine_stats"]["write_groups"]
+                if not sync:
+                    tput.setdefault(f"spin {spin}, yield {yield_us} µs", []).append(
+                        (t, entry["summary"]["ops_per_sec"]["median"]))
+                rows.append([label, t, entry["summary"]["ops_per_sec"]["median"],
+                             entry["summary"]["p99_ns"]["median"] / 1e3, run["ops"] / groups if groups else 0.0,
+                             perf(run, "cycles_per_op")])
+    tb.plot_throughput_vs_threads(tput, c.out / exp / "throughput.png",
+                                  "fillrandom (no sync): throughput vs threads by wait policy")
+    table(c.out / exp / "summary.md", ["policy", "threads", "ops/s", "p99 µs", "writes/group", "cycles/op"],
+          rows, "Experiment 8 (supplement to 1 and 2): how group-commit waiters wait (fillrandom).")
 
 
 EXPERIMENTS = {
     1: exp_group_commit, 2: exp_concurrent_memtable, 3: exp_super_version, 4: exp_bloom,
-    5: exp_rate_limiter, 6: exp_mmap_hugepages, 7: exp_prefetch,
+    5: exp_rate_limiter, 6: exp_mmap_hugepages, 7: exp_prefetch, 8: exp_spin,
 }
 
 

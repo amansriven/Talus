@@ -3,6 +3,9 @@
 #if defined(__linux__)
 #include <pthread.h>
 #include <sched.h>
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 #endif
 
 namespace talus {
@@ -24,6 +27,18 @@ void PinCurrentThreadToCpus(const std::vector<int>& cpus) {
   (void)pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
 #else
   (void)cpus;
+#endif
+}
+
+void SetCurrentThreadNice(int nice) {
+#if defined(__linux__)
+  if (nice != 0) {
+    // On Linux, PRIO_PROCESS with a thread ID sets that thread's nice value.
+    // Failure (e.g. lowering below 0 without privilege) only costs latency.
+    (void)setpriority(PRIO_PROCESS, static_cast<id_t>(syscall(SYS_gettid)), nice);
+  }
+#else
+  (void)nice;
 #endif
 }
 

@@ -9,9 +9,8 @@
 namespace talus {
 
 GroupCommitter::GroupCommitter(log::Writer* log, MemTable* mem, SequenceNumber last_sequence,
-                               int spin_iterations, Hooks hooks,
-                               size_t max_group_bytes)
-    : write_thread_(spin_iterations, max_group_bytes),
+                               WriteThread::WaitOptions wait, Hooks hooks, size_t max_group_bytes)
+    : write_thread_(wait, max_group_bytes),
       hooks_(std::move(hooks)),
       log_(log),
       mem_(mem),

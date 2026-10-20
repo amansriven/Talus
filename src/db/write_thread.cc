@@ -1,6 +1,7 @@
 #include "db/write_thread.h"
 
 #include <cassert>
+#include <chrono>
 #include <thread>
 
 #include "db/write_batch_internal.h"
@@ -118,12 +119,35 @@ uint8_t WriteThread::AwaitState(Writer* w, uint8_t goal_mask) const {
   // Acquire throughout: pairs with the release in SetState, so the setter's
   // writes (status, group, sequence) are visible once the goal state is seen.
   uint8_t state = w->state.load(std::memory_order_acquire);
-  for (int i = 0; (state & goal_mask) == 0 && i < spin_iterations_; ++i) {
+  for (int i = 0; (state & goal_mask) == 0 && i < wait_.spin_iterations; ++i) {
     CpuRelax();
     state = w->state.load(std::memory_order_acquire);
   }
   if ((state & goal_mask) != 0) {
     return state;
+  }
+
+  // Yield phase. Ends at the time budget, or early once yields keep taking
+  // long: then other threads need this core more than we need to wake fast.
+  if (wait_.max_yield_micros > 0) {
+    using Clock = std::chrono::steady_clock;
+    const auto start = Clock::now();
+    const auto budget = std::chrono::microseconds(wait_.max_yield_micros);
+    auto last = start;
+    int slow_yields = 0;
+    while (true) {
+      std::this_thread::yield();
+      state = w->state.load(std::memory_order_acquire);
+      if ((state & goal_mask) != 0) {
+        return state;
+      }
+      const auto now = Clock::now();
+      if (now - start >= budget || (now - last >= std::chrono::microseconds(kSlowYieldMicros) &&
+                                    ++slow_yields >= kMaxSlowYields)) {
+        break;
+      }
+      last = now;
+    }
   }
 
   // Announce that we are about to block, so the setter knows to notify. If

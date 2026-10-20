@@ -10,6 +10,20 @@
 
 namespace talus {
 
+// How a writer waits for its turn, in three phases (RocksDB's adaptive
+// wait): poll with CpuRelax() `spin_iterations` times, then call
+// std::this_thread::yield() for up to `max_yield_micros`, then block in
+// atomic::wait. A group commit without fsync takes a few microseconds, so
+// most waits end while polling or yielding and the woken writer is already
+// running: a futex wake-up costs more than the work it waits for. Yielding
+// gives the core to any runnable thread, such as compaction, without that
+// cost. Waits for an fsync (milliseconds) still block. Experiment 8 in
+// docs/PERFORMANCE.md measures these values.
+struct WriteWaitOptions {
+  int spin_iterations = 256;
+  int max_yield_micros = 100;
+};
+
 // The leader/follower protocol behind group commit (spec §5). It only
 // coordinates threads: the caller (GroupCommitter) performs the WAL write
 // and the memtable inserts.
@@ -91,13 +105,11 @@ class WriteThread {
     }
   };
 
-  // Number of CpuRelax() polls before a waiter blocks in atomic::wait. A
-  // group commit typically finishes in a few microseconds (a write(2), or a
-  // memtable insert). 256 polls is about 1-10 µs depending on the CPU's
-  // PAUSE/YIELD latency, so short waits stay out of the kernel while long
-  // ones, such as fsync, block. Experiment 1 in docs/PERFORMANCE.md sweeps
-  // this value.
-  static constexpr int kDefaultSpinIterations = 256;
+  using WaitOptions = WriteWaitOptions;
+  // A yield that takes longer than this means another thread used the core;
+  // after kMaxSlowYields of them the waiter blocks instead of competing.
+  static constexpr int kSlowYieldMicros = 3;
+  static constexpr int kMaxSlowYields = 3;
 
   // Writers are merged into a group until it reaches this many bytes. The
   // leader's own batch is always included, even if it is larger.
@@ -105,9 +117,8 @@ class WriteThread {
 
   // max_group_bytes = 0 disables grouping: each leader commits only its own
   // batch (the "group commit off" baseline of experiment 1).
-  explicit WriteThread(int spin_iterations = kDefaultSpinIterations,
-                       size_t max_group_bytes = kMaxGroupBytes)
-      : spin_iterations_(spin_iterations), max_group_bytes_(max_group_bytes) {}
+  explicit WriteThread(WaitOptions wait = {}, size_t max_group_bytes = kMaxGroupBytes)
+      : wait_(wait), max_group_bytes_(max_group_bytes) {}
 
   WriteThread(const WriteThread&) = delete;
   WriteThread& operator=(const WriteThread&) = delete;
@@ -143,7 +154,7 @@ class WriteThread {
   // `link_newer` is already set, or whose `link_older` is null.
   static void CreateMissingNewerLinks(Writer* head);
 
-  const int spin_iterations_;
+  const WaitOptions wait_;
   const size_t max_group_bytes_;
   std::atomic<Writer*> newest_writer_{nullptr};
 };

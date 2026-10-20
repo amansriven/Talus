@@ -20,7 +20,7 @@ endforeach()
 
 add_executable(micro_bench micro/micro_bench.cc)
 target_include_directories(micro_bench PRIVATE ${PROJECT_SOURCE_DIR}/src)
-target_link_libraries(micro_bench PRIVATE talus talus_bench_common benchmark::benchmark talus_warnings)
+target_link_libraries(micro_bench PRIVATE talus_bench_common benchmark::benchmark talus_warnings)
 
 if(Talus_BUILD_TESTS)
   # Needed here too: before CMake 3.29 the discovery script path is a

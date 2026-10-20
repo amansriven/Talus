@@ -41,6 +41,12 @@ class TableCache {
   std::unique_ptr<InternalIterator> NewIterator(uint64_t file_number, uint64_t file_size,
                                                 const TableReadOptions& options = {});
 
+  // Opens table `file_number` into the cache, validating its footer, index
+  // and filter. Flush and compaction call it on every new table before
+  // installing it, so readers never pay for the open (LevelDB and RocksDB do
+  // the same when they verify a new table).
+  Status Preload(uint64_t file_number, uint64_t file_size);
+
   // Closes the table, if open (call once its file is deleted). Readers that
   // still pin it keep it open until they finish.
   void Evict(uint64_t file_number);
